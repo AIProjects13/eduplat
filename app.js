@@ -81,6 +81,7 @@ const callApi = httpsCallable(functions, 'api', { timeout: 120000 });
 const emptyDb = () => ({
     users: [], cursos: [], unidades: [], pensum: [], items: [], inscripciones: [],
     entregas: [], asistencia: [], auditoria: [], bitacora: [],
+    noticias: [], lecturas: [], anotaciones: [],
 });
 
 const state = {
@@ -299,7 +300,7 @@ const MSG = {
 };
 
 // Acciones de solo lectura: es seguro reintentarlas si la respuesta llega incompleta.
-const READ_ACTIONS = new Set(['getSnapshot', 'getEntregaFile', 'verifyAudit']);
+const READ_ACTIONS = new Set(['getSnapshot', 'getEntregaFile', 'verifyAudit', 'getNoticiaFoto', 'noticiaDetalle']);
 
 async function api(action, payload = {}, { forceRefresh = false, retried = false } = {}) {
     if (!auth.currentUser) throw new ApiError('UNAUTHENTICATED', 'Tu sesión no está iniciada.');
@@ -450,22 +451,23 @@ function attendanceStats(estId, cursoId = null) {
 
 const NAV = {
     ADMIN: [
-        ['dashboard', 'Resumen', 'layout-dashboard'], ['usuarios', 'Usuarios', 'users'], ['cursos', 'Cursos', 'book-open'],
+        ['dashboard', 'Resumen', 'layout-dashboard'], ['muro', 'Muro', 'newspaper'], ['usuarios', 'Usuarios', 'users'], ['cursos', 'Cursos', 'book-open'],
         ['calificaciones', 'Calificaciones', 'clipboard-list'], ['asistencia', 'Asistencia', 'calendar-check'],
         ['auditoria', 'Auditoría', 'history'], ['perfil', 'Mi perfil', 'circle-user'],
     ],
     TUTOR: [
-        ['dashboard', 'Resumen', 'layout-dashboard'], ['cursos', 'Mis cursos', 'book-open'], ['usuarios', 'Mis estudiantes', 'graduation-cap'],
+        ['dashboard', 'Resumen', 'layout-dashboard'], ['muro', 'Muro', 'newspaper'], ['cursos', 'Mis cursos', 'book-open'], ['usuarios', 'Mis estudiantes', 'graduation-cap'],
         ['calificaciones', 'Calificaciones', 'clipboard-list'], ['asistencia', 'Asistencia', 'calendar-check'],
         ['auditoria', 'Bitácora', 'history'], ['perfil', 'Mi perfil', 'circle-user'],
     ],
     ESTUDIANTE: [
-        ['inicio', 'Inicio', 'house'], ['mis-cursos', 'Mis cursos', 'book-open'],
+        ['muro', 'Muro', 'newspaper'], ['inicio', 'Inicio', 'house'], ['mis-cursos', 'Mis cursos', 'book-open'],
         ['mi-asistencia', 'Asistencia', 'calendar-check'], ['perfil', 'Mi perfil', 'circle-user'],
     ],
-    PADRE: [['progreso', 'Progreso', 'trending-up']],
+    PADRE: [['muro', 'Muro', 'newspaper'], ['progreso', 'Progreso', 'trending-up']],
 };
-const HOME = { ADMIN: 'dashboard', TUTOR: 'dashboard', ESTUDIANTE: 'inicio', PADRE: 'progreso' };
+// Alumnos y padres entran primero al muro (noticias y pendientes).
+const HOME = { ADMIN: 'dashboard', TUTOR: 'dashboard', ESTUDIANTE: 'muro', PADRE: 'muro' };
 
 const T = [ROLES.ADMIN, ROLES.TUTOR], E = [ROLES.ESTUDIANTE], P = [ROLES.PADRE];
 const VIEWS = {
@@ -481,6 +483,7 @@ const VIEWS = {
     'mis-cursos':    { roles: E, title: () => 'Mis cursos', render: viewStudentCursos },
     'mi-asistencia': { roles: E, title: () => 'Mi asistencia', render: viewStudentAsistencia },
     progreso:        { roles: P, title: () => 'Progreso académico', render: viewParent },
+    muro:            { roles: [ROLES.ADMIN, ROLES.TUTOR, ROLES.ESTUDIANTE, ROLES.PADRE], title: () => 'Muro', render: viewMuro, after: cargarFotosMuro },
     perfil:          { roles: [ROLES.ADMIN, ROLES.TUTOR, ROLES.ESTUDIANTE], title: () => 'Mi perfil', render: viewPerfil },
 };
 
@@ -975,12 +978,13 @@ function cursoEvaluaciones(c, m) {
             return `<div class="unit-block">
                 <div class="unit-head"><h3>U${u.numero} · ${esc(u.nombre)} <small class="muted">(${fmtPeso(u.peso)} del curso)</small></h3>${sumBadge(s)}</div>
                 <ul class="item-list">${u.items.map(i => {
-                    const calificadas = alumnosDe(c.CursoID).filter(a => notaGuardada(a.ID, i.ItemID) != null).length;
+                    const t = tasaEntrega(i);
                     return `<li class="item-row">
                         ${tipoBadge(i.Tipo)}
                         <div class="item-main">${itemLink(i)}
-                            <div class="item-meta"><span>Ponderación ${fmtPeso(i.Ponderacion)}</span>${i.FechaEntrega ? `<span>Entrega ${fmtDate(i.FechaEntrega)}</span>` : ''}<span>${calificadas}/${alumnos} calificados</span></div></div>
-                        <div class="item-side">${m ? `
+                            <div class="item-meta"><span>Ponderación ${fmtPeso(i.Ponderacion)}</span>${i.FechaEntrega ? `<span>Entrega ${fmtDate(i.FechaEntrega)}</span>` : ''}<span class="${t.pct === 100 ? 'grade good' : ''}">Entregas ${t.n}/${t.total}${t.pct != null ? ` (${fmtNota(t.pct)}%)` : ''}</span></div></div>
+                        <div class="item-side">
+                            <button class="btn btn-ghost btn-sm" data-action="ver-entregas" data-id="${esc(i.ItemID)}">${ico('check-check')} Entregas</button>${m ? `
                             <button class="icon-btn" data-action="edit-item" data-id="${esc(i.ItemID)}" aria-label="Editar evaluación" title="Editar">${ico('pencil')}</button>
                             <button class="icon-btn danger" data-action="delete-item" data-id="${esc(i.ItemID)}" aria-label="Eliminar evaluación" title="Eliminar">${ico('trash')}</button>` : ''}
                         </div></li>`;
@@ -1397,7 +1401,7 @@ function itemEstado(item, estId) {
     const ent = idx.entregas.get(`${estId}|${item.ItemID}`);
     const nota = toNum(ent?.Nota);
     if (nota != null) return { key: 'calificado', html: `<span class="badge badge-success">Calificado</span> ${gradePill(nota)}`, ent, nota };
-    if (ent?.Estado === 'Entregado') return { key: 'entregado', html: '<span class="badge badge-info">Entregado</span>', ent, nota };
+    if (ent?.Estado === 'Entregado' || ent?.RecibidoEn) return { key: 'entregado', html: '<span class="badge badge-info">Entregado</span>', ent, nota };
     const vencido = item.FechaEntrega && item.FechaEntrega < today();
     return { key: vencido ? 'vencido' : 'pendiente', html: `<span class="badge ${vencido ? 'badge-danger' : 'badge-warn'}">${vencido ? 'Vencido' : 'Pendiente'}</span>`, ent, nota };
 }
@@ -1426,7 +1430,8 @@ function viewStudentHome() {
     ${proximas.length ? `<section class="card"><div class="card-head"><h2>Próximas entregas</h2></div>
         <ul class="item-list">${proximas.map(i => `<li class="item-row">${tipoBadge(i.Tipo)}
             <div class="item-main">${itemLink(i)}<div class="item-meta"><span>${esc(idx.cursos.get(i.CursoID)?.NombreCurso)}</span><span>Entrega ${fmtDate(i.FechaEntrega)}</span></div></div>
-            <div class="item-side"><a class="btn btn-ghost btn-sm" href="#/mis-cursos" data-action="open-student-course" data-curso="${esc(i.CursoID)}">Ir al curso</a></div></li>`).join('')}</ul></section>` : ''}`;
+            <div class="item-side"><a class="btn btn-ghost btn-sm" href="#/mis-cursos" data-action="open-student-course" data-curso="${esc(i.CursoID)}">Ir al curso</a></div></li>`).join('')}</ul></section>` : ''}
+    ${anotacionesSection(me.ID)}`;
 }
 
 function courseSummaryCard(estId, c, linkToCourse = false) {
@@ -1474,14 +1479,34 @@ function viewStudentCursos() {
 
 function studentItemRow(item, estId) {
     const st = itemEstado(item, estId);
-    const puedeSubir = state.me.Rol === ROLES.ESTUDIANTE && TIPOS_CON_ENTREGA.includes(item.Tipo) && st.nota == null;
+    const rol = state.me.Rol;
+    const puedeSubir = rol === ROLES.ESTUDIANTE && TIPOS_CON_ENTREGA.includes(item.Tipo) && st.nota == null;
+    const ent = st.ent;
+    const marcas = [
+        ent?.HechaEn ? `<span class="badge badge-info" title="Marcada por el alumno · ${esc(fmtDateTime(ent.HechaEn))}">${ico('check')}Hecha</span>` : '',
+        ent?.RevisadaEn ? `<span class="badge badge-success" title="Revisada por ${esc(ent.RevisadaPor)} · ${esc(fmtDateTime(ent.RevisadaEn))}">${ico('check-check')}Revisada</span>` : '',
+        ent?.RecibidoEn ? '<span class="badge badge-brand">Recibido</span>' : '',
+    ].join('');
+    const datos = `data-item="${esc(item.ItemID)}" data-est="${esc(estId)}"`;
+    let seguimiento = '';
+    if (rol === ROLES.ESTUDIANTE && TIPOS_CON_ENTREGA.includes(item.Tipo) && st.nota == null && !ent?.TieneArchivo) {
+        seguimiento = ent?.HechaEn
+            ? `<button class="btn btn-link" data-action="marcar-tarea" data-accion="pendiente" ${datos}>Deshacer</button>`
+            : `<button class="btn btn-ghost btn-sm" data-action="marcar-tarea" data-accion="hecha" ${datos}>${ico('check')} Marcar como hecha</button>`;
+    }
+    if (rol === ROLES.PADRE) {
+        seguimiento = ent?.RevisadaEn
+            ? `<button class="btn btn-link" data-action="marcar-tarea" data-accion="no-revisada" ${datos}>Deshacer revisión</button>`
+            : `<button class="btn btn-ghost btn-sm" data-action="marcar-tarea" data-accion="revisada" ${datos}>${ico('check-check')} Marcar revisada</button>`;
+    }
     return `<li class="item-row">
         ${tipoBadge(item.Tipo)}
         <div class="item-main">${itemLink(item)}
             <div class="item-meta"><span>Ponderación ${fmtPeso(item.Ponderacion)}</span>${item.FechaEntrega ? `<span>Entrega ${fmtDate(item.FechaEntrega)}</span>` : ''}
             ${entregaBtn(st.ent, `${ico('paperclip', 'icon-sm')} ${state.me.Rol === ROLES.ESTUDIANTE ? 'Ver mi entrega' : 'Ver entrega'}`, 'btn btn-link')}</div></div>
-        <div class="item-side">${st.html}
-            ${puedeSubir ? `<button class="btn ${st.ent ? 'btn-ghost' : 'btn-primary'} btn-sm" data-action="upload-entrega" data-item="${esc(item.ItemID)}">${ico('upload')} ${st.ent ? 'Reemplazar archivo' : 'Subir entrega'}</button>` : ''}
+        <div class="item-side">${st.html}${marcas}
+            ${puedeSubir ? `<button class="btn ${st.ent?.TieneArchivo ? 'btn-ghost' : 'btn-primary'} btn-sm" data-action="upload-entrega" data-item="${esc(item.ItemID)}">${ico('upload')} ${st.ent?.TieneArchivo ? 'Reemplazar archivo' : 'Subir entrega'}</button>` : ''}
+            ${seguimiento}
         </div></li>`;
 }
 
@@ -1556,6 +1581,7 @@ function progressView(estId, { showAudit = false } = {}) {
         ${kpi('Evaluaciones calificadas', calificadas, '', 'circle-check')}
     </div>
     ${cursoCards || `<section class="card">${emptyState('Sin cursos inscritos.', 'book-open')}</section>`}
+    ${anotacionesSection(estId)}
     ${attendanceSection(estId)}
     ${showAudit ? auditTimeline(estId) : ''}`;
 }
@@ -1582,6 +1608,321 @@ function auditTimeline(estId) {
             <small class="muted">Por ${esc(e.por)}</small></li>`).join('')}</ul>`
         : emptyState('Sin cambios ni comentarios registrados.', 'message-square')}
     </section>`;
+}
+
+// ==========================================================================
+// 9b. MURO: noticias, pendientes, anotaciones y marcas de seguimiento
+// ==========================================================================
+
+const TIPOS_ANOTACION = ['Positiva', 'Académica', 'Conducta', 'Disciplinaria'];
+const ANOTACION_BADGE = { Positiva: 'badge-success', 'Académica': 'badge-info', Conducta: 'badge-warn', Disciplinaria: 'badge-danger' };
+const fotosNoticias = new Map();   // NoticiaID → imagen (caché de la sesión)
+
+const esStaff = () => [ROLES.ADMIN, ROLES.TUTOR].includes(state.me.Rol);
+const esPadre = () => state.me.Rol === ROLES.PADRE;
+const miLectura = (noticiaId) => state.db.lecturas.find(l => l.NoticiaID === noticiaId);
+const gestionaNoticia = (n) => isAdmin() || n.AutorID === state.me.ID;
+const hijosDe = () => String(state.me.HijosIDs || '').split(',').map(id => idx.users.get(id)).filter(Boolean);
+/** Cuenta como entregada si tiene archivo, el maestro marcó "Recibido" o ya tiene nota. */
+const entregada = (ent) => !!ent && (!!ent.TieneArchivo || !!ent.RecibidoEn || toNum(ent.Nota) != null);
+
+function tasaEntrega(item) {
+    const alumnos = alumnosDe(item.CursoID);
+    const n = alumnos.filter(a => entregada(idx.entregas.get(`${a.ID}|${item.ItemID}`))).length;
+    return { n, total: alumnos.length, pct: alumnos.length ? (n / alumnos.length) * 100 : null };
+}
+
+function alcanceTexto(n) {
+    if (n.Alcance === 'COLEGIO') return 'Todo el colegio';
+    const nombres = (n.CursoIDs || []).map(id => idx.cursos.get(id)?.NombreCurso).filter(Boolean);
+    return nombres.length ? nombres.join(', ') : 'Cursos específicos';
+}
+
+/** Actualiza una entrega en memoria tras una marca (sin recargar todo). */
+function actualizarEntrega(estId, itemId, patch) {
+    const id = `${itemId}_${estId}`;
+    let e = state.db.entregas.find(x => x.EntregaID === id);
+    if (!e) {
+        e = { EntregaID: id, ItemID: itemId, EstudianteID: estId, Nota: '', Estado: 'Pendiente', TieneArchivo: false };
+        state.db.entregas.push(e);
+    }
+    Object.assign(e, patch);
+    buildIndex();
+}
+
+const prioridadNoticia = (n) => (n.Obligatoria && esPadre() && !miLectura(n.NoticiaID) ? 1 : 0);
+
+function viewMuro() {
+    const noticias = [...state.db.noticias].sort((a, b) =>
+        prioridadNoticia(b) - prioridadNoticia(a) || String(b.PublicadaEn).localeCompare(String(a.PublicadaEn)));
+    const atencion = atencionItems();
+    return `
+    <div class="row-between">
+        <p class="muted">${esStaff() ? 'Noticias del colegio y seguimiento de tus cursos.' : 'Avisos del colegio y lo que necesita tu atención.'}</p>
+        ${esStaff() ? `<button class="btn btn-primary" data-action="new-noticia">${ico('megaphone')} Publicar noticia</button>` : ''}
+    </div>
+    ${atencion.length ? `<section class="card atencion">
+        <div class="card-head"><h2 class="meta-line">${ico('bell')} Requiere tu atención</h2><span class="badge badge-warn">${atencion.length}</span></div>
+        <ul class="item-list">${atencion.join('')}</ul></section>` : ''}
+    <section class="stack">
+        <h2 class="eyebrow">Noticias</h2>
+        ${noticias.length ? `<div class="news-feed">${noticias.map(noticiaCard).join('')}</div>`
+            : `<section class="card">${emptyState('No hay nada nuevo.', 'newspaper')}</section>`}
+    </section>`;
+}
+
+function itemAtencion(badge, titulo, detalle, botones) {
+    return `<li class="item-row">${badge}<div class="item-main"><strong>${titulo}</strong>${detalle ? `<div class="item-meta">${detalle}</div>` : ''}</div>
+        <div class="item-side">${botones}</div></li>`;
+}
+
+/** Lo pendiente de cada rol, con su acción directa. */
+function atencionItems() {
+    const out = [];
+    const rol = state.me.Rol;
+    if (rol === ROLES.PADRE) {
+        state.db.noticias.filter(n => n.Obligatoria && !miLectura(n.NoticiaID)).forEach(n => out.push(itemAtencion(
+            `<span class="badge badge-danger">${ico('bell')}Obligatoria</span>`, esc(n.Titulo), `<span>${esc(n.AutorNombre)}</span><span>${fmtDate(n.PublicadaEn)}</span>`,
+            `<button class="btn btn-primary btn-sm" data-action="leer-noticia" data-id="${esc(n.NoticiaID)}">${ico('check-check')} Leído y entendido</button>`)));
+        state.db.anotaciones.filter(a => !a.Confirmaciones?.[state.me.ID]).forEach(a => out.push(itemAtencion(
+            `<span class="badge ${ANOTACION_BADGE[a.Tipo] || ''}">${esc(a.Tipo)}</span>`,
+            `Anotación sobre ${esc(idx.users.get(a.EstudianteID)?.Nombre || 'tu hijo')}`,
+            `<span>${esc(a.Texto.length > 90 ? a.Texto.slice(0, 90) + '…' : a.Texto)}</span><span>${esc(a.AutorNombre)}</span>`,
+            `<button class="btn btn-primary btn-sm" data-action="confirmar-anotacion" data-id="${esc(a.AnotacionID)}">${ico('check-check')} Enterado</button>`)));
+        hijosDe().forEach(h => cursosDe(h.ID).flatMap(c => idx.itemsByCurso.get(c.CursoID) || []).forEach(i => {
+            const ent = idx.entregas.get(`${h.ID}|${i.ItemID}`);
+            if (ent?.HechaEn && !ent.RevisadaEn && toNum(ent.Nota) == null) {
+                out.push(itemAtencion(tipoBadge(i.Tipo), `${esc(h.Nombre)} marcó como hecha: ${esc(i.Titulo)}`,
+                    `<span>${esc(idx.cursos.get(i.CursoID)?.NombreCurso)}</span><span>${fmtDateTime(ent.HechaEn)}</span>`,
+                    `<button class="btn btn-ghost btn-sm" data-action="marcar-tarea" data-accion="revisada" data-item="${esc(i.ItemID)}" data-est="${esc(h.ID)}">${ico('check-check')} Marcar revisada</button>`));
+            } else if (TIPOS_CON_ENTREGA.includes(i.Tipo) && i.FechaEntrega && i.FechaEntrega < today() && !entregada(ent) && !ent?.HechaEn) {
+                out.push(itemAtencion('<span class="badge badge-danger">Vencida</span>', `${esc(h.Nombre)} no ha entregado: ${esc(i.Titulo)}`,
+                    `<span>${esc(idx.cursos.get(i.CursoID)?.NombreCurso)}</span><span>Venció ${fmtDate(i.FechaEntrega)}</span>`,
+                    `<a class="btn btn-ghost btn-sm" href="#/progreso">Ver progreso</a>`));
+            }
+        }));
+    }
+    if (rol === ROLES.ESTUDIANTE) {
+        cursosDe(state.me.ID).flatMap(c => idx.itemsByCurso.get(c.CursoID) || []).forEach(i => {
+            const ent = idx.entregas.get(`${state.me.ID}|${i.ItemID}`);
+            if (!TIPOS_CON_ENTREGA.includes(i.Tipo) || toNum(ent?.Nota) != null || ent?.HechaEn || entregada(ent)) return;
+            const vencida = i.FechaEntrega && i.FechaEntrega < today();
+            out.push(itemAtencion(vencida ? '<span class="badge badge-danger">Vencida</span>' : tipoBadge(i.Tipo), esc(i.Titulo),
+                `<span>${esc(idx.cursos.get(i.CursoID)?.NombreCurso)}</span>${i.FechaEntrega ? `<span>Entrega ${fmtDate(i.FechaEntrega)}</span>` : ''}`,
+                `<button class="btn btn-ghost btn-sm" data-action="marcar-tarea" data-accion="hecha" data-item="${esc(i.ItemID)}" data-est="${esc(state.me.ID)}">${ico('check')} Marcar como hecha</button>
+                 <button class="btn btn-link" data-action="open-student-course" data-curso="${esc(i.CursoID)}">Ir al curso</button>`));
+        });
+    }
+    if (esStaff()) {
+        const propios = new Set(cursosGestionables().map(c => c.CursoID));
+        const porCalificar = state.db.entregas.filter(e => toNum(e.Nota) == null && (e.TieneArchivo || e.RecibidoEn) && propios.has(idx.items.get(e.ItemID)?.CursoID)).length;
+        if (porCalificar) out.push(itemAtencion('<span class="badge badge-warn">Por calificar</span>', `${porCalificar} entrega(s) esperan nota`, '',
+            `<a class="btn btn-primary btn-sm" href="#/calificaciones">Calificar</a>`));
+        cursosGestionables().flatMap(c => idx.itemsByCurso.get(c.CursoID) || []).forEach(i => {
+            if (!i.FechaEntrega || i.FechaEntrega >= today()) return;
+            const t = tasaEntrega(i);
+            if (t.total && t.n < t.total) out.push(itemAtencion(tipoBadge(i.Tipo), `${esc(i.Titulo)}: faltan ${t.total - t.n} entrega(s)`,
+                `<span>${esc(idx.cursos.get(i.CursoID)?.NombreCurso)}</span><span>Venció ${fmtDate(i.FechaEntrega)}</span><span>${t.n}/${t.total} (${fmtNota(t.pct)}%)</span>`,
+                `<button class="btn btn-ghost btn-sm" data-action="ver-entregas" data-id="${esc(i.ItemID)}">${ico('check-check')} Entregas</button>`));
+        });
+        state.db.noticias.filter(n => n.Obligatoria && n.AutorID === state.me.ID && !n.Vencida).forEach(n => out.push(itemAtencion(
+            `<span class="badge badge-danger">${ico('bell')}Obligatoria</span>`, `Tu noticia: ${esc(n.Titulo)}`, `<span>Revisa qué padres ya confirmaron</span>`,
+            `<button class="btn btn-ghost btn-sm" data-action="detalle-noticia" data-id="${esc(n.NoticiaID)}">${ico('users')} Confirmaciones</button>`)));
+    }
+    return out;
+}
+
+function noticiaCard(n) {
+    const lect = miLectura(n.NoticiaID);
+    const obligPadre = n.Obligatoria && esPadre();
+    const accion = lect
+        ? `<span class="badge badge-success">${ico('check-check')}${obligPadre ? 'Leído y entendido' : 'Visto'} · ${fmtDateTime(lect.Fecha)}</span>`
+        : `<button class="btn ${obligPadre ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="leer-noticia" data-id="${esc(n.NoticiaID)}">${ico(obligPadre ? 'check-check' : 'eye')} ${obligPadre ? 'Leído y entendido' : 'Marcar como visto'}</button>`;
+    const gestion = gestionaNoticia(n) ? `
+        <button class="btn btn-ghost btn-sm" data-action="detalle-noticia" data-id="${esc(n.NoticiaID)}">${ico('users')} ${n.Obligatoria ? 'Confirmaciones' : 'Lecturas'}</button>
+        <button class="icon-btn" data-action="edit-noticia" data-id="${esc(n.NoticiaID)}" title="Editar" aria-label="Editar noticia">${ico('pencil')}</button>
+        <button class="icon-btn danger" data-action="delete-noticia" data-id="${esc(n.NoticiaID)}" title="Eliminar" aria-label="Eliminar noticia">${ico('trash')}</button>` : '';
+    return `<article class="card news-card${obligPadre && !lect ? ' is-pendiente' : ''}">
+        ${n.TieneFoto ? `<div class="news-foto" data-foto="${esc(n.NoticiaID)}"><span class="spinner"></span></div>` : ''}
+        <div class="news-body">
+            <div class="row">${n.Obligatoria ? `<span class="badge badge-danger">${ico('bell')}Obligatoria</span>` : ''}
+                <span class="badge">${esc(alcanceTexto(n))}</span>${n.Vencida ? '<span class="badge badge-warn">Vencida</span>' : ''}</div>
+            <h3>${esc(n.Titulo)}</h3>
+            <p class="news-text">${esc(n.Cuerpo)}</p>
+            <div class="news-meta"><span>${esc(n.AutorNombre)}</span><span>${fmtDateTime(n.PublicadaEn)}</span><span>Visible hasta ${fmtDate(n.VenceEl)}</span></div>
+            <div class="row-between"><div>${accion}</div><div class="row">${gestion}</div></div>
+        </div>
+    </article>`;
+}
+
+/** Las fotos se piden aparte (son privadas) y se guardan en memoria durante la sesión. */
+function cargarFotosMuro() {
+    $$('[data-foto]').forEach((el) => {
+        const id = el.dataset.foto;
+        const pintar = (src) => { el.innerHTML = `<img src="${esc(src)}" alt="">`; };
+        if (fotosNoticias.has(id)) return pintar(fotosNoticias.get(id));
+        api('getNoticiaFoto', { NoticiaID: id })
+            .then((r) => { fotosNoticias.set(id, r.dataUrl); if (document.body.contains(el)) pintar(r.dataUrl); })
+            .catch(() => el.remove());
+    });
+}
+
+/** Reduce la foto (lado mayor 1280 px, JPEG) para que el muro cargue rápido. */
+async function comprimirFoto(file, maxLado = 1280, maxChars = 1300000) {
+    const bitmap = await createImageBitmap(file).catch(() => { throw new Error('No se pudo leer la imagen. Prueba con otro archivo JPG o PNG.'); });
+    const escala = Math.min(1, maxLado / Math.max(bitmap.width, bitmap.height));
+    const w = Math.round(bitmap.width * escala);
+    const h = Math.round(bitmap.height * escala);
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, w, h);
+    ctx.drawImage(bitmap, 0, 0, w, h);
+    bitmap.close?.();
+    for (let q = 0.85; q >= 0.4; q -= 0.1) {
+        const d = canvas.toDataURL('image/jpeg', q);
+        if (d.length <= maxChars) return d;
+    }
+    throw new Error('La imagen es demasiado pesada. Prueba con otra.');
+}
+
+async function openNoticiaModal(n = null) {
+    const cursos = cursosGestionables();
+    const d = new Date();
+    d.setDate(d.getDate() + 14);
+    const venceDef = d.toLocaleDateString('en-CA');
+    const alcance = n?.Alcance || 'COLEGIO';
+    const sel = new Set(n?.CursoIDs || []);
+    await openModal({
+        title: n ? 'Editar noticia' : 'Publicar noticia',
+        wide: true,
+        submitLabel: n ? 'Guardar cambios' : 'Publicar',
+        body: `<div class="form-grid">
+            <label class="field span-all"><span>Título *</span><input name="Titulo" required maxlength="160" value="${esc(n?.Titulo)}"></label>
+            <label class="field span-all"><span>Mensaje *</span><textarea name="Cuerpo" required maxlength="5000" rows="5">${esc(n?.Cuerpo)}</textarea></label>
+            <fieldset class="field span-all" style="border:0;padding:0;margin:0"><span>¿Para quién? *</span>
+                <div class="segmented" role="radiogroup" aria-label="Destinatarios">
+                    <label><input type="radio" name="Alcance" value="COLEGIO" data-change="noticia-alcance" ${alcance === 'COLEGIO' ? 'checked' : ''}><span>Todo el colegio</span></label>
+                    <label><input type="radio" name="Alcance" value="CURSOS" data-change="noticia-alcance" ${alcance === 'CURSOS' ? 'checked' : ''}><span>Cursos específicos</span></label>
+                </div>
+                <div class="check-list" data-cursos style="margin-top:10px" ${alcance === 'CURSOS' ? '' : 'hidden'}>${cursos.length
+                    ? cursos.map(c => `<label class="check-item"><input type="checkbox" name="CursoIDs" value="${esc(c.CursoID)}" ${sel.has(c.CursoID) ? 'checked' : ''}><span><strong>${esc(c.NombreCurso)}</strong></span></label>`).join('')
+                    : '<p class="muted">No tienes cursos asignados.</p>'}</div>
+            </fieldset>
+            <label class="field"><span>Visible hasta *</span><input type="date" name="VenceEl" required min="${today()}" value="${esc(n?.VenceEl || venceDef)}"></label>
+            <label class="check-item" style="align-self:end"><input type="checkbox" name="Obligatoria" ${n?.Obligatoria ? 'checked' : ''}>
+                <span><strong>Obligatoria</strong><small>Los padres deben confirmar "Leído y entendido"</small></span></label>
+            <div class="field span-all"><span>Foto (opcional)</span>
+                <div class="row">
+                    <button type="button" class="btn btn-ghost btn-sm" data-action="noticia-foto">${ico('image')} ${n?.TieneFoto ? 'Cambiar foto' : 'Agregar foto'}</button>
+                    <span class="muted" data-foto-estado>${n?.TieneFoto ? 'Tiene foto' : 'Sin foto'}</span>
+                    ${n?.TieneFoto ? '<label class="row" style="gap:6px"><input type="checkbox" name="QuitarFoto"> Quitar foto</label>' : ''}
+                </div>
+                <img data-foto-preview alt="" class="news-preview" hidden>
+            </div>
+        </div>`,
+        onSubmit: async (fd, form) => {
+            const alc = fd.get('Alcance');
+            const cursoIds = fd.getAll('CursoIDs');
+            if (alc === 'CURSOS' && !cursoIds.length) throw new Error('Selecciona al menos un curso.');
+            const payload = {
+                NoticiaID: n?.NoticiaID, Titulo: fd.get('Titulo'), Cuerpo: fd.get('Cuerpo'), Alcance: alc,
+                CursoIDs: cursoIds, VenceEl: fd.get('VenceEl'), Obligatoria: fd.get('Obligatoria') === 'on',
+            };
+            if (form.dataset.foto) payload.Foto = form.dataset.foto;
+            else if (fd.get('QuitarFoto') === 'on') payload.Foto = 'QUITAR';
+            await withBusy(() => api('saveNoticia', payload));
+            if (n) fotosNoticias.delete(n.NoticiaID);
+            toast(n ? 'Noticia actualizada.' : 'Noticia publicada.', 'success');
+            await refresh();
+        },
+    });
+}
+
+async function detalleNoticia(id) {
+    const n = state.db.noticias.find(x => x.NoticiaID === id);
+    let d;
+    try { d = await withBusy(() => api('noticiaDetalle', { NoticiaID: id })); } catch (e) { return toast(e.message, 'error'); }
+    const lista = (arr) => arr.length
+        ? `<ul class="plain-list">${arr.map(u => `<li><strong>${esc(u.Nombre)}</strong>${u.Rol ? ` <small class="muted">(${esc(ROLE_LABEL[u.Rol] || u.Rol)})</small>` : ''}${u.Fecha ? ` <small class="muted">· ${fmtDateTime(u.Fecha)}</small>` : ''}</li>`).join('')}</ul>`
+        : '<p class="muted">Nadie todavía.</p>';
+    await openModal({
+        title: `${n?.Obligatoria ? 'Confirmaciones' : 'Lecturas'} · ${n?.Titulo || ''}`,
+        wide: true,
+        submitLabel: 'Cerrar',
+        body: n?.Obligatoria
+            ? `<div class="grid grid-kpi">${kpi('Padres destinatarios', d.destinatarios)}${kpi('Confirmaron', d.confirmados.length)}${kpi('Pendientes', d.pendientes.length)}</div>
+               <h3>Confirmaron</h3>${lista(d.confirmados)}<h3>Pendientes</h3>${lista(d.pendientes)}`
+            : `<p>${d.lecturas.length} persona(s) la marcaron como vista.</p>${lista(d.lecturas)}`,
+        onSubmit: async () => true,
+    });
+}
+
+/** Detalle de entregas de una evaluación: quién entregó, marcas y "Recibido". */
+function filasEntregas(it) {
+    const m = canManage(it.CursoID);
+    return alumnosDe(it.CursoID).map((a) => {
+        const ent = idx.entregas.get(`${a.ID}|${it.ItemID}`);
+        const estado = entregada(ent) ? '<span class="badge badge-success">Entregada</span>'
+            : (it.FechaEntrega && it.FechaEntrega < today() ? '<span class="badge badge-danger">Sin entregar</span>' : '<span class="badge badge-warn">Pendiente</span>');
+        return `<tr><td>${person(a)}</td><td>${estado}</td>
+            <td>${ent?.TieneArchivo ? entregaBtn(ent, `${ico('paperclip', 'icon-sm')} Archivo`, 'btn btn-link') : '—'}</td>
+            <td>${ent?.HechaEn ? `<small>${fmtDateTime(ent.HechaEn)}</small>` : '—'}</td>
+            <td>${ent?.RevisadaEn ? `<small>${esc(ent.RevisadaPor)}<br>${fmtDateTime(ent.RevisadaEn)}</small>` : '—'}</td>
+            <td class="center">${m ? `<input type="checkbox" data-change="recibido" data-item="${esc(it.ItemID)}" data-est="${esc(a.ID)}" ${ent?.RecibidoEn ? 'checked' : ''} aria-label="Recibido de ${esc(a.Nombre)}">` : (ent?.RecibidoEn ? ico('check') : '—')}</td>
+            <td class="center">${gradePill(toNum(ent?.Nota))}</td></tr>`;
+    }).join('');
+}
+
+function tasaTexto(it) {
+    const t = tasaEntrega(it);
+    return `<strong>${t.n}/${t.total}</strong> entregadas${t.pct != null ? ` (${fmtNota(t.pct)}%)` : ''}${it.FechaEntrega ? ` · fecha de entrega ${fmtDate(it.FechaEntrega)}` : ''}`;
+}
+
+async function verEntregas(itemId) {
+    const it = idx.items.get(itemId);
+    if (!it) return;
+    await openModal({
+        title: `Entregas · ${it.Titulo}`,
+        wide: true,
+        submitLabel: 'Listo',
+        body: `<p data-tasa>${tasaTexto(it)}</p>
+            <p class="muted" style="font-size:13px">Cuenta como entregada si el alumno subió el archivo, si marcaste "Recibido" (entregas en papel o exámenes) o si ya tiene nota.</p>
+            <div class="table-wrap"><table class="table"><thead><tr><th>Estudiante</th><th>Estado</th><th>Archivo</th><th>Hecha (alumno)</th><th>Revisada (padre)</th><th class="center">Recibido</th><th class="center">Nota</th></tr></thead>
+            <tbody data-filas data-item="${esc(it.ItemID)}">${filasEntregas(it)}</tbody></table></div>`,
+        onSubmit: async () => true,
+    });
+    render();
+}
+
+function anotacionesSection(estId) {
+    const lista = state.db.anotaciones.filter(a => a.EstudianteID === estId);
+    const puedeAnotar = esStaff() && (isAdmin() || cursosDe(estId).some(c => c.TutorID === state.me.ID));
+    if (!lista.length && !puedeAnotar) return '';
+    return `<section class="card">
+        <div class="card-head"><h2 class="meta-line">${ico('notebook')} Anotaciones</h2>
+            ${puedeAnotar ? `<button class="btn btn-primary btn-sm" data-action="new-anotacion" data-est="${esc(estId)}">${ico('plus')} Nueva anotación</button>` : ''}</div>
+        ${lista.length ? `<ul class="timeline">${lista.map(anotacionItem).join('')}</ul>` : emptyState('Sin anotaciones.', 'notebook')}
+    </section>`;
+}
+
+function anotacionItem(a) {
+    const confs = Object.values(a.Confirmaciones || {});
+    const mia = a.Confirmaciones?.[state.me.ID];
+    return `<li>
+        <div class="row-between"><div class="row"><span class="badge ${ANOTACION_BADGE[a.Tipo] || ''}">${esc(a.Tipo)}</span><strong>${esc(a.AutorNombre)}</strong></div>
+            <small class="muted">${fmtDateTime(a.Fecha)}</small></div>
+        <p class="news-text">${esc(a.Texto)}</p>
+        <div class="row-between">
+            <small class="muted">${confs.length ? 'Enterado: ' + confs.map(c => `${esc(c.Nombre)} (${fmtDateTime(c.Fecha)})`).join(', ') : 'Los padres aún no confirman'}</small>
+            <div class="row">
+                ${esPadre() && !mia ? `<button class="btn btn-primary btn-sm" data-action="confirmar-anotacion" data-id="${esc(a.AnotacionID)}">${ico('check-check')} Enterado</button>` : ''}
+                ${isAdmin() || a.AutorID === state.me.ID ? `<button class="icon-btn danger" data-action="delete-anotacion" data-id="${esc(a.AnotacionID)}" title="Eliminar" aria-label="Eliminar anotación">${ico('trash')}</button>` : ''}
+            </div>
+        </div>
+    </li>`;
 }
 
 function viewPerfil() {
@@ -1899,6 +2240,87 @@ const ACTIONS = {
     },
     'upload-photo': (el) => uploadPhoto(el),
     'pick-child': (el) => { state.childId = el.dataset.id; render(); },
+    // Muro
+    'new-noticia': () => openNoticiaModal(),
+    'edit-noticia': (el) => openNoticiaModal(state.db.noticias.find(n => n.NoticiaID === el.dataset.id)),
+    'detalle-noticia': (el) => detalleNoticia(el.dataset.id),
+    'delete-noticia': async (el) => {
+        const n = state.db.noticias.find(x => x.NoticiaID === el.dataset.id);
+        await openModal({
+            title: `Eliminar "${n?.Titulo || 'noticia'}"`, danger: true, submitLabel: 'Eliminar',
+            body: '<p>La noticia desaparecerá del muro de todos. Queda registro en la bitácora.</p>',
+            onSubmit: async () => { await withBusy(() => api('deleteNoticia', { NoticiaID: el.dataset.id })); toast('Noticia eliminada.', 'success'); await refresh(); },
+        });
+    },
+    'leer-noticia': async (el) => {
+        el.disabled = true;
+        try {
+            const r = await withBusy(() => api('marcarNoticia', { NoticiaID: el.dataset.id }));
+            if (!state.db.lecturas.some(l => l.LecturaID === r.LecturaID)) state.db.lecturas.push(r);
+            render();
+        } catch (e) { toast(e.message, 'error'); el.disabled = false; }
+    },
+    'noticia-foto': async (el) => {
+        const file = await pickFile('image/jpeg,image/png,image/webp');
+        if (!file) return;
+        if (!file.type.startsWith('image/')) return toast('Selecciona una imagen.', 'error');
+        if (file.size > 15 * 1024 * 1024) return toast('La imagen supera 15 MB.', 'error');
+        try {
+            const dataUrl = await comprimirFoto(file);
+            const form = el.closest('form');
+            form.dataset.foto = dataUrl;
+            const prev = form.querySelector('[data-foto-preview]');
+            prev.src = dataUrl;
+            prev.hidden = false;
+            form.querySelector('[data-foto-estado]').textContent = 'Foto lista para publicar';
+        } catch (e) { toast(e.message, 'error'); }
+    },
+    'marcar-tarea': async (el) => {
+        el.disabled = true;
+        try {
+            const est = el.dataset.est || state.me.ID;
+            const r = await withBusy(() => api('marcarTarea', { ItemID: el.dataset.item, EstudianteID: est, accion: el.dataset.accion }));
+            actualizarEntrega(est, el.dataset.item, r);
+            render();
+        } catch (e) { toast(e.message, 'error'); el.disabled = false; }
+    },
+    'ver-entregas': (el) => verEntregas(el.dataset.id),
+    'new-anotacion': async (el) => {
+        const est = idx.users.get(el.dataset.est);
+        await openModal({
+            title: `Nueva anotación · ${est?.Nombre || ''}`,
+            submitLabel: 'Registrar',
+            body: `<label class="field"><span>Tipo *</span><select name="Tipo" required>${options(TIPOS_ANOTACION.map(t => [t, t]), 'Académica')}</select></label>
+                <label class="field"><span>Anotación *</span><textarea name="Texto" required maxlength="3000" rows="4" placeholder="Describe lo observado y, si aplica, lo que se espera en casa."></textarea></label>
+                <p class="muted" style="font-size:13px">Los padres la verán en su muro y deberán confirmar "Enterado".</p>`,
+            onSubmit: async (fd) => {
+                await withBusy(() => api('saveAnotacion', { EstudianteID: el.dataset.est, Tipo: fd.get('Tipo'), Texto: fd.get('Texto') }));
+                toast('Anotación registrada.', 'success');
+                await refresh();
+            },
+        });
+    },
+    'confirmar-anotacion': async (el) => {
+        el.disabled = true;
+        try {
+            const r = await withBusy(() => api('confirmarAnotacion', { AnotacionID: el.dataset.id }));
+            const a = state.db.anotaciones.find(x => x.AnotacionID === el.dataset.id);
+            if (a) a.Confirmaciones = r.Confirmaciones;
+            render();
+        } catch (e) { toast(e.message, 'error'); el.disabled = false; }
+    },
+    'delete-anotacion': async (el) => {
+        await openModal({
+            title: 'Eliminar anotación', danger: true, submitLabel: 'Eliminar',
+            body: `<p>La anotación dejará de mostrarse. Su contenido queda guardado en la bitácora.</p>${justificationField('Explica por qué se elimina.')}`,
+            onSubmit: async (fd) => {
+                await withBusy(() => api('deleteAnotacion', { AnotacionID: el.dataset.id, justificacion: fd.get('justificacion') }));
+                toast('Anotación eliminada.', 'success');
+                await refresh();
+            },
+        });
+    },
+
 };
 
 const INPUTS = {
@@ -1937,6 +2359,25 @@ const CHANGES = {
             badge.textContent = `${cupoTexto(marcados)} cupos usados`;
             badge.className = `badge ${marcados >= CONFIG.MAX_ALUMNOS_CURSO ? 'badge-warn' : 'badge-brand'}`;
         }
+    },
+    'noticia-alcance': (el) => {
+        const box = el.form.querySelector('[data-cursos]');
+        if (box) box.hidden = el.value !== 'CURSOS';
+    },
+    'recibido': async (el) => {
+        el.disabled = true;
+        try {
+            const r = await api('marcarRecibido', { ItemID: el.dataset.item, EstudianteID: el.dataset.est, recibido: el.checked });
+            actualizarEntrega(el.dataset.est, el.dataset.item, r);
+            const it = idx.items.get(el.dataset.item);
+            const tasa = document.querySelector('#modal [data-tasa]');
+            if (tasa) tasa.innerHTML = tasaTexto(it);
+            const filas = document.querySelector('#modal [data-filas]');
+            if (filas) filas.innerHTML = filasEntregas(it);
+        } catch (e) {
+            el.checked = !el.checked;
+            toast(e.message, 'error');
+        } finally { el.disabled = false; }
     },
     'user-form-rol': (el) => {
         const fs = el.form.querySelector('[data-role-only="PADRE"]');

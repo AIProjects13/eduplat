@@ -17,6 +17,7 @@ import {
     getFunctions, httpsCallable, connectFunctionsEmulator,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js';
 import { ico, hydrateIcons } from './icons.js';
+import { puntualidad, notaEfectiva, notaAprobacion, estadoFinal, reglaTexto } from './notas.js';
 
 // ==========================================================================
 // 1. CONFIGURACIÓN
@@ -215,10 +216,33 @@ function fmtDateTime(s) {
     return `${fmtDate(s)}${time ? ' · ' + time : ''}`;
 }
 
-function gradeClass(v) {
+/** Color de una nota: destacada (≥85), aprobada (≥ nota mínima del curso) o en riesgo. */
+function gradeClass(v, aprob = CONFIG.NOTA_APROBACION) {
     if (v == null) return 'muted';
-    if (v >= CONFIG.NOTA_DESTACADA) return 'good';
-    return v >= CONFIG.NOTA_APROBACION ? 'ok' : 'risk';
+    if (v >= Math.max(CONFIG.NOTA_DESTACADA, aprob)) return 'good';
+    return v >= aprob ? 'ok' : 'risk';
+}
+
+const ESTADO_FINAL = {
+    aprobado: '<span class="badge badge-success">Aprobado</span>',
+    reprobado: '<span class="badge badge-danger">Reprobado</span>',
+    'sin-notas': '<span class="badge">Sin notas</span>',
+};
+const estadoBadge = (final, curso) => ESTADO_FINAL[estadoFinal(final, curso)];
+const aprobDe = (cursoId) => notaAprobacion(idx.cursos.get(cursoId));
+
+/** Nota efectiva guardada (con la penalización por tarde, si corresponde). */
+function notaEfectivaDe(estId, itemId) {
+    return notaEfectiva(idx.items.get(itemId), idx.entregas.get(`${estId}|${itemId}`));
+}
+
+/** Etiqueta de puntualidad de una entrega: tarde (con su regla), excepción o nada. */
+function puntualidadBadge(item, ent) {
+    const pu = puntualidad(item, ent);
+    if (!pu.tarde) return '';
+    if (pu.excepcion) return `<span class="badge badge-info" title="${esc(ent.Excepcion.Comentario)} · ${esc(ent.Excepcion.Por)}">Tarde · con excepción</span>`;
+    const regla = item.PenalizacionTipo === 'TOTAL' ? 'pierde la nota' : item.PenalizacionTipo === 'PORCENTAJE' ? `−${item.PenalizacionPct}%` : 'sin descuento';
+    return `<span class="badge badge-warn" title="${esc(reglaTexto(item))}">Tarde · ${regla}</span>`;
 }
 
 function mean(arr) {
@@ -429,7 +453,7 @@ const Grades = {
     },
 
     forStudent(estId, cursoId) {
-        return this.course(cursoId, itemId => notaGuardada(estId, itemId));
+        return this.course(cursoId, itemId => notaEfectivaDe(estId, itemId));
     },
 
     general(estId) {
@@ -585,14 +609,17 @@ function viewTutorDashboard() {
         const alumnos = alumnosDe(c.CursoID);
         const finales = alumnos.map(a => Grades.forStudent(a.ID, c.CursoID).final);
         const prom = mean(finales);
-        const riesgo = finales.filter(f => f != null && f < CONFIG.NOTA_APROBACION).length;
+        const aprob = aprobDe(c.CursoID);
+        const aprobados = finales.filter(f => f != null && f >= aprob).length;
+        const riesgo = finales.filter(f => f != null && f < aprob).length;
         return `<tr>
             <td><a href="#/curso/${encodeURIComponent(c.CursoID)}"><strong>${esc(c.NombreCurso)}</strong></a></td>
             ${admin ? `<td>${esc(tutorDe(c))}</td>` : ''}
             <td class="num">${cupoTexto(alumnos.length)}</td>
             <td class="num">${(idx.itemsByCurso.get(c.CursoID) || []).length}</td>
             <td class="center">${gradePill(prom)}</td>
-            <td class="center">${riesgo ? `<span class="badge badge-danger">${riesgo} en riesgo</span>` : '<span class="badge badge-success">0</span>'}</td>
+            <td class="center"><span class="badge badge-success">${aprobados}</span> <span class="badge ${riesgo ? 'badge-danger' : ''}">${riesgo}</span>
+                <small class="muted">(mín. ${aprob})</small></td>
             <td class="actions"><button class="btn btn-ghost btn-sm" data-action="open-gradebook" data-curso="${esc(c.CursoID)}">Calificar</button></td>
         </tr>`;
     }).join('');
@@ -623,7 +650,7 @@ function viewTutorDashboard() {
         <div class="card-head"><h2>Rendimiento por curso</h2>
             ${admin ? '<button class="btn btn-primary btn-sm" data-action="new-course">+ Nuevo curso</button>' : ''}</div>
         ${cursos.length ? `<div class="table-wrap"><table class="table">
-            <thead><tr><th>Curso</th>${admin ? '<th>Tutor</th>' : ''}<th class="num">Estudiantes</th><th class="num">Evaluaciones</th><th class="center">Promedio</th><th class="center">Riesgo (&lt;${CONFIG.NOTA_APROBACION})</th><th></th></tr></thead>
+            <thead><tr><th>Curso</th>${admin ? '<th>Tutor</th>' : ''}<th class="num">Estudiantes</th><th class="num">Evaluaciones</th><th class="center">Promedio</th><th class="center">Aprobados / Reprobados</th><th></th></tr></thead>
             <tbody>${filasCursos}</tbody></table></div>`
         : emptyState(admin ? 'Aún no hay cursos. Crea el primero y asígnale un tutor.' : 'Aún no tienes cursos asignados. El administrador te los asignará.', 'book-open')}
     </section>
@@ -829,6 +856,8 @@ function courseForm(c = null) {
                 ${options(tutores.map(t => [t.ID, `${t.Nombre}${t.Rol === ROLES.ADMIN ? ' (administrador)' : ''}`]), c?.TutorID)}
             </select>
             <small class="field-hint">El tutor asignado gestiona unidades, tareas, notas y asistencia de este curso. Un tutor puede tener varias clases. Cupo máximo: ${CONFIG.MAX_ALUMNOS_CURSO} estudiantes por clase. ${tutores.length <= 1 ? 'Para agregar tutores, créalos en "Usuarios" con rol Tutor.' : ''}</small></label>
+        <label class="field"><span>Nota mínima para aprobar *</span><input type="number" name="NotaAprobacion" min="0" max="100" step="0.01" required value="${esc(c?.NotaAprobacion ?? 60)}">
+            <small class="field-hint">Sobre 100. El docente del curso también puede ajustarla.</small></label>
         <label class="field"><span>Descripción</span><textarea name="Descripcion" maxlength="1000">${esc(c?.Descripcion)}</textarea></label>`;
 }
 
@@ -839,7 +868,7 @@ async function openCourseModal(c = null) {
         onSubmit: async (fd) => {
             const r = await withBusy(() => api('saveCourse', {
                 CursoID: c?.CursoID, NombreCurso: fd.get('NombreCurso'), Descripcion: fd.get('Descripcion'),
-                TutorID: fd.get('TutorID'),
+                TutorID: fd.get('TutorID'), NotaAprobacion: fd.get('NotaAprobacion'),
             }));
             toast(c ? 'Curso actualizado.' : 'Curso creado.', 'success');
             await refresh();
@@ -851,14 +880,16 @@ async function openCourseModal(c = null) {
 function viewCursoDetalle(cursoId) {
     const c = idx.cursos.get(cursoId);
     if (!c) return `<section class="card">${emptyState('El curso no existe.', 'search', '<a class="btn btn-ghost" href="#/cursos">Volver a cursos</a>')}</section>`;
-    const tabs = [['evaluaciones', 'Evaluaciones'], ['unidades', 'Unidades y ponderación'], ['pensum', 'Pensum'], ['estudiantes', 'Estudiantes']];
+    const tabs = [['evaluaciones', 'Evaluaciones'], ['resultados', 'Resultados'], ['unidades', 'Unidades y ponderación'], ['pensum', 'Pensum'], ['estudiantes', 'Estudiantes']];
     const tab = state.cursoTab;
     const m = canManage(c.CursoID);
-    const body = { evaluaciones: cursoEvaluaciones, unidades: cursoUnidades, pensum: cursoPensum, estudiantes: cursoEstudiantes }[tab](c, m);
+    const body = { evaluaciones: cursoEvaluaciones, resultados: cursoResultados, unidades: cursoUnidades, pensum: cursoPensum, estudiantes: cursoEstudiantes }[tab](c, m);
     return `
     <div class="row-between">
         <div><a class="btn btn-link" href="#/cursos">${ico('arrow-left')} Cursos</a>
-            <div class="row"><span class="muted meta-line">${ico('presentation', 'icon-sm')}${esc(tutorDe(c))}</span>${c.Descripcion ? `<span class="muted">· ${esc(c.Descripcion)}</span>` : ''}</div></div>
+            <div class="row"><span class="muted meta-line">${ico('presentation', 'icon-sm')}${esc(tutorDe(c))}</span>${c.Descripcion ? `<span class="muted">· ${esc(c.Descripcion)}</span>` : ''}
+                <span class="badge badge-brand">Aprueba con ${fmtNota(aprobDe(c.CursoID))}</span>
+                ${m ? `<button class="btn btn-link" data-action="nota-aprobacion" data-curso="${esc(c.CursoID)}">Cambiar</button>` : ''}</div></div>
         <div class="row">
             ${m ? `<button class="btn btn-ghost btn-sm" data-action="open-gradebook" data-curso="${esc(c.CursoID)}">${ico('clipboard-check')} Calificar</button>` : ''}
             ${isAdmin() ? `<button class="btn btn-ghost btn-sm" data-action="edit-course" data-id="${esc(c.CursoID)}">${ico('pencil')} Editar / reasignar</button>
@@ -871,6 +902,28 @@ function viewCursoDetalle(cursoId) {
     ${body}`;
 }
 
+function cursoResultados(c) {
+    const alumnos = alumnosDe(c.CursoID);
+    if (!alumnos.length) return `<section class="card">${emptyState('No hay estudiantes inscritos en este curso.', 'graduation-cap')}</section>`;
+    const aprob = aprobDe(c.CursoID);
+    const filas = alumnos.map(a => ({ a, final: Grades.forStudent(a.ID, c.CursoID).final }))
+        .sort((x, y) => (y.final ?? -1) - (x.final ?? -1));
+    const cuenta = (e) => filas.filter(f => estadoFinal(f.final, c) === e).length;
+    return `<div class="grid grid-kpi">
+        ${kpi('Aprobados', cuenta('aprobado'), `Nota mínima ${fmtNota(aprob)}`, 'circle-check')}
+        ${kpi('Reprobados', cuenta('reprobado'), '', 'alert-triangle')}
+        ${kpi('Sin notas', cuenta('sin-notas'), '', 'clipboard-list')}
+        ${kpi('Promedio del curso', fmtNota(mean(filas.map(f => f.final))), '', 'award')}
+    </div>
+    <section class="card"><div class="card-head"><h2>Resultados por estudiante</h2><small class="muted">Notas con penalizaciones por entrega tarde aplicadas</small></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Estudiante</th><th class="center">Nota final</th><th class="center">Estado</th><th></th></tr></thead>
+        <tbody>${filas.map(f => `<tr><td>${person(f.a, f.a.Grado)}</td>
+            <td class="center"><span class="grade-pill ${gradeClass(f.final, aprob)}">${fmtNota(f.final)}</span></td>
+            <td class="center">${estadoBadge(f.final, c)}</td>
+            <td class="actions"><a class="btn btn-ghost btn-sm" href="#/estudiante/${encodeURIComponent(f.a.ID)}">Ver perfil</a></td></tr>`).join('')}</tbody></table></div>
+    </section>`;
+}
+
 function cursoUnidades(c, m) {
     const defined = [...(idx.unidadesByCurso.get(c.CursoID) || [])].sort((a, b) => +a.Unidad - +b.Unidad);
     const units = Grades.units(c.CursoID);
@@ -881,11 +934,12 @@ function cursoUnidades(c, m) {
             ${m ? `<button class="btn btn-primary btn-sm" data-action="new-unit" data-curso="${esc(c.CursoID)}">+ Unidad</button>` : ''}</div>
         ${sinDefinir.length ? `<div class="card-body"><p class="alert alert-info">${ico('info')}<span>${defined.length ? 'Hay evaluaciones en unidades sin ponderación configurada (cuentan como 0%): ' + sinDefinir.map(u => 'U' + u.numero).join(', ') : 'Sin unidades configuradas: todas las unidades pesan lo mismo en el promedio final.'}</span></p></div>` : ''}
         ${defined.length ? `<div class="table-wrap"><table class="table">
-            <thead><tr><th>#</th><th>Nombre</th><th class="num">Ponderación</th><th class="num">Evaluaciones</th><th>Suma de evaluaciones</th><th></th></tr></thead>
+            <thead><tr><th>#</th><th>Nombre</th><th>Periodo</th><th class="num">Ponderación</th><th class="num">Evaluaciones</th><th>Suma de evaluaciones</th><th></th></tr></thead>
             <tbody>${defined.map(u => {
                 const its = (idx.itemsByCurso.get(c.CursoID) || []).filter(i => +i.Unidad === +u.Unidad);
                 const s = its.reduce((a, i) => a + (toNum(i.Ponderacion) ?? 0), 0);
                 return `<tr><td><strong>U${esc(u.Unidad)}</strong></td><td>${esc(u.NombreUnidad)}</td>
+                    <td><small>${u.FechaInicio || u.FechaFin ? `${u.FechaInicio ? fmtDate(u.FechaInicio) : '…'} – ${u.FechaFin ? fmtDate(u.FechaFin) : '…'}` : '<span class="muted">Sin fechas</span>'}</small></td>
                     <td class="num">${fmtPeso(u.Ponderacion)}</td><td class="num">${its.length}</td>
                     <td>${its.length ? sumBadge(s) : '<span class="muted">—</span>'}</td>
                     <td class="actions">${m ? `<button class="icon-btn" data-action="edit-unit" data-id="${esc(u.UnidadID)}" aria-label="Editar unidad" title="Editar">${ico('pencil')}</button>
@@ -907,11 +961,14 @@ async function openUnitModal(cursoId, u = null) {
             <label class="field"><span>Número *</span><input type="number" name="Unidad" min="1" max="50" step="1" required value="${esc(u?.Unidad ?? nextUnitNumber(cursoId))}"></label>
             <label class="field"><span>Ponderación (%) *</span><input type="number" name="Ponderacion" min="0" max="100" step="0.01" required value="${esc(u?.Ponderacion ?? '')}"></label>
             <label class="field span-all"><span>Nombre *</span><input name="NombreUnidad" required maxlength="120" value="${esc(u?.NombreUnidad)}" placeholder="Ej.: Álgebra básica"></label>
+            <label class="field"><span>Inicio (opcional)</span><input type="date" name="FechaInicio" value="${esc(u?.FechaInicio)}"></label>
+            <label class="field"><span>Fin (opcional)</span><input type="date" name="FechaFin" value="${esc(u?.FechaFin)}"></label>
         </div>`,
         onSubmit: async (fd) => {
             await withBusy(() => api('saveUnit', {
                 UnidadID: u?.UnidadID, CursoID: cursoId,
                 Unidad: fd.get('Unidad'), NombreUnidad: fd.get('NombreUnidad'), Ponderacion: fd.get('Ponderacion'),
+                FechaInicio: fd.get('FechaInicio'), FechaFin: fd.get('FechaFin'),
             }));
             toast('Unidad guardada.', 'success');
             await refresh();
@@ -982,7 +1039,7 @@ function cursoEvaluaciones(c, m) {
                     return `<li class="item-row">
                         ${tipoBadge(i.Tipo)}
                         <div class="item-main">${itemLink(i)}
-                            <div class="item-meta"><span>Ponderación ${fmtPeso(i.Ponderacion)}</span>${i.FechaEntrega ? `<span>Entrega ${fmtDate(i.FechaEntrega)}</span>` : ''}<span class="${t.pct === 100 ? 'grade good' : ''}">Entregas ${t.n}/${t.total}${t.pct != null ? ` (${fmtNota(t.pct)}%)` : ''}</span></div></div>
+                            <div class="item-meta"><span>Ponderación ${fmtPeso(i.Ponderacion)}</span>${i.FechaEntrega ? `<span>Entrega ${fmtDate(i.FechaEntrega)}</span>` : ''}${i.PenalizacionTipo && i.PenalizacionTipo !== 'NINGUNA' ? `<span>${esc(reglaTexto(i))}</span>` : ''}<span class="${t.pct === 100 ? 'grade good' : ''}">Entregas ${t.n}/${t.total}${t.pct != null ? ` (${fmtNota(t.pct)}%)` : ''}</span></div></div>
                         <div class="item-side">
                             <button class="btn btn-ghost btn-sm" data-action="ver-entregas" data-id="${esc(i.ItemID)}">${ico('check-check')} Entregas</button>${m ? `
                             <button class="icon-btn" data-action="edit-item" data-id="${esc(i.ItemID)}" aria-label="Editar evaluación" title="Editar">${ico('pencil')}</button>
@@ -1005,12 +1062,22 @@ async function openItemModal(cursoId, it = null) {
                 <small class="field-hint">El estudiante lo verá como hipervínculo directo con el título.</small></label>
             <label class="field"><span>Ponderación dentro de la unidad (%) *</span><input type="number" name="Ponderacion" min="0" max="100" step="0.01" required value="${esc(it?.Ponderacion ?? '')}"></label>
             <label class="field"><span>Fecha de entrega</span><input type="date" name="FechaEntrega" value="${esc(it?.FechaEntrega)}"></label>
+            <fieldset class="field span-all" style="border:0;padding:0;margin:0"><span>Si se entrega tarde…</span>
+                <div class="segmented" role="radiogroup" aria-label="Penalización por entrega tarde">
+                    ${[['NINGUNA', 'Sin descuento'], ['PORCENTAJE', 'Descontar %'], ['TOTAL', 'Pierde la nota']].map(([v, l]) =>
+                        `<label><input type="radio" name="PenalizacionTipo" value="${v}" data-change="penalizacion" ${(it?.PenalizacionTipo || 'NINGUNA') === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+                </div>
+                <label class="field" data-pct style="margin-top:10px;max-width:220px" ${it?.PenalizacionTipo === 'PORCENTAJE' ? '' : 'hidden'}>
+                    <span>Porcentaje a descontar</span><input type="number" name="PenalizacionPct" min="1" max="100" step="1" value="${esc(it?.PenalizacionPct || 10)}"></label>
+                <small class="field-hint">Es tarde si se entrega después de la fecha de entrega. Puedes hacer excepciones por alumno, con comentario, desde "Entregas".</small>
+            </fieldset>
         </div>`,
         onSubmit: async (fd) => {
             await withBusy(() => api('saveItem', {
                 ItemID: it?.ItemID, CursoID: cursoId, Tipo: fd.get('Tipo'), Unidad: fd.get('Unidad'),
                 Titulo: fd.get('Titulo'), EnlaceURL: fd.get('EnlaceURL'), Ponderacion: fd.get('Ponderacion'),
                 FechaEntrega: fd.get('FechaEntrega'),
+                PenalizacionTipo: fd.get('PenalizacionTipo') || 'NINGUNA', PenalizacionPct: fd.get('PenalizacionPct'),
             }));
             toast('Evaluación guardada.', 'success');
             await refresh();
@@ -1118,7 +1185,7 @@ function viewCalificaciones() {
         <button class="btn btn-ghost" data-action="gb-discard" id="gb-discard">Descartar</button>
         <button class="btn btn-primary" data-action="gb-save" id="gb-save">Guardar cambios</button>
     </div>
-    <p class="muted" style="font-size:13px">Escala 0–100 · Aprobado ≥ ${CONFIG.NOTA_APROBACION}. Los promedios se recalculan al escribir. <kbd>Enter</kbd> baja a la siguiente fila. Deja la celda vacía para quitar una nota.</p>
+    <p class="muted" style="font-size:13px">Escala 0–100 · Aprueba con ${fmtNota(aprobDe(cursoId))} o más. Escribe la nota del trabajo; si se entregó tarde, los promedios ya aplican la penalización de esa evaluación (la celda se marca en ámbar). <kbd>Enter</kbd> baja a la siguiente fila. Deja la celda vacía para quitar una nota.</p>
     <section class="card"><div class="table-wrap" style="max-height:70vh">${gradebookTable(cursoId)}</div></section>`;
 }
 
@@ -1140,33 +1207,43 @@ function gradebookTable(cursoId) {
             const key = `${a.ID}|${i.ItemID}`;
             const draft = state.gb.draft.has(key);
             const val = draft ? state.gb.draft.get(key) : (notaGuardada(a.ID, i.ItemID) ?? '');
-            return `<td class="cell">${entregaBtn(idx.entregas.get(key), ico('paperclip'), 'file-dot')}
+            const ent = idx.entregas.get(key);
+            const pu = puntualidad(i, ent);
+            const marca = pu.tarde ? `<span class="late-dot${pu.excepcion ? ' is-exc' : ''}" title="${esc(pu.excepcion ? 'Entregada tarde · con excepción: ' + ent.Excepcion.Comentario : 'Entregada tarde · ' + reglaTexto(i))}">T</span>` : '';
+            return `<td class="cell${pu.tarde && !pu.excepcion ? ' is-late' : ''}">${entregaBtn(ent, ico('paperclip'), 'file-dot')}${marca}
                 <input class="grade-input${draft ? ' is-dirty' : ''}" type="number" inputmode="decimal" min="0" max="100" step="0.01"
                     value="${esc(val)}" data-input="gb-cell" data-est="${esc(a.ID)}" data-item="${esc(i.ItemID)}"
                     aria-label="${esc(`${a.Nombre} · ${i.Titulo}`)}"></td>`;
         }).join('') + `<td class="avg-col" data-u="${esc(a.ID)}|${u.numero}"></td>`).join('')}
-        <td class="final-col" data-f="${esc(a.ID)}"></td></tr>`).join('');
+        <td class="final-col" data-f="${esc(a.ID)}"></td><td class="center" data-e="${esc(a.ID)}"></td></tr>`).join('');
 
     const foot = `<tr><th class="sticky-col" scope="row">Promedio del grupo</th>
         ${units.map(u => u.items.map(i => `<td data-ci="${esc(i.ItemID)}"></td>`).join('') + `<td class="avg-col" data-cu="${u.numero}"></td>`).join('')}
-        <td class="final-col" data-cf></td></tr>`;
+        <td class="final-col" data-cf></td><td></td></tr>`;
 
     return `<table class="gradebook" id="gradebook">
-        <thead><tr><th class="sticky-col" rowspan="2">Estudiante</th>${head1}<th class="final-col" rowspan="2">Final</th></tr><tr>${head2}</tr></thead>
+        <thead><tr><th class="sticky-col" rowspan="2">Estudiante</th>${head1}<th class="final-col" rowspan="2">Final</th><th rowspan="2">Estado</th></tr><tr>${head2}</tr></thead>
         <tbody>${body}</tbody><tfoot>${foot}</tfoot></table>`;
 }
 
 function setGradeCell(el, v) {
     if (!el) return;
-    el.innerHTML = `<span class="grade ${gradeClass(v)}">${fmtNota(v)}</span>`;
+    el.innerHTML = `<span class="grade ${gradeClass(v, aprobDe(state.gb.cursoId))}">${fmtNota(v)}</span>`;
+}
+
+/** Nota efectiva de la celda (borrador o guardada) con la penalización de la evaluación. */
+function gbEfectiva(estId, itemId) {
+    return notaEfectiva(idx.items.get(itemId), idx.entregas.get(`${estId}|${itemId}`), gbValue(estId, itemId));
 }
 
 function gbRecalcRow(estId) {
     const table = $('#gradebook');
     if (!table) return;
-    const res = Grades.course(state.gb.cursoId, itemId => gbValue(estId, itemId));
+    const res = Grades.course(state.gb.cursoId, itemId => gbEfectiva(estId, itemId));
     res.units.forEach(u => setGradeCell(table.querySelector(`[data-u="${CSS.escape(`${estId}|${u.numero}`)}"]`), u.promedio));
     setGradeCell(table.querySelector(`[data-f="${CSS.escape(estId)}"]`), res.final);
+    const estado = table.querySelector(`[data-e="${CSS.escape(estId)}"]`);
+    if (estado) estado.innerHTML = estadoBadge(res.final, idx.cursos.get(state.gb.cursoId));
     return res;
 }
 
@@ -1175,9 +1252,9 @@ function gbRecalcFooter() {
     if (!table) return;
     const cursoId = state.gb.cursoId;
     const alumnos = alumnosDe(cursoId);
-    const results = alumnos.map(a => Grades.course(cursoId, itemId => gbValue(a.ID, itemId)));
+    const results = alumnos.map(a => Grades.course(cursoId, itemId => gbEfectiva(a.ID, itemId)));
     Grades.units(cursoId).forEach((u, k) => {
-        u.items.forEach(i => setGradeCell(table.querySelector(`[data-ci="${CSS.escape(i.ItemID)}"]`), mean(alumnos.map(a => gbValue(a.ID, i.ItemID)))));
+        u.items.forEach(i => setGradeCell(table.querySelector(`[data-ci="${CSS.escape(i.ItemID)}"]`), mean(alumnos.map(a => gbEfectiva(a.ID, i.ItemID)))));
         setGradeCell(table.querySelector(`[data-cu="${u.numero}"]`), mean(results.map(r => r.units[k]?.promedio)));
     });
     setGradeCell(table.querySelector('[data-cf]'), mean(results.map(r => r.final)));
@@ -1400,7 +1477,13 @@ function viewTutorStudent(estId) {
 function itemEstado(item, estId) {
     const ent = idx.entregas.get(`${estId}|${item.ItemID}`);
     const nota = toNum(ent?.Nota);
-    if (nota != null) return { key: 'calificado', html: `<span class="badge badge-success">Calificado</span> ${gradePill(nota)}`, ent, nota };
+    if (nota != null) {
+        const ef = notaEfectiva(item, ent);
+        const pill = ef !== nota
+            ? `<span class="grade-pill ${gradeClass(ef, aprobDe(item.CursoID))}" title="Nota del trabajo: ${fmtNota(nota)} · ${esc(reglaTexto(item))}">${fmtNota(ef)}</span>`
+            : gradePill(nota);
+        return { key: 'calificado', html: `<span class="badge badge-success">Calificado</span> ${pill}`, ent, nota };
+    }
     if (ent?.Estado === 'Entregado' || ent?.RecibidoEn) return { key: 'entregado', html: '<span class="badge badge-info">Entregado</span>', ent, nota };
     const vencido = item.FechaEntrega && item.FechaEntrega < today();
     return { key: vencido ? 'vencido' : 'pendiente', html: `<span class="badge ${vencido ? 'badge-danger' : 'badge-warn'}">${vencido ? 'Vencido' : 'Pendiente'}</span>`, ent, nota };
@@ -1504,7 +1587,7 @@ function studentItemRow(item, estId) {
         <div class="item-main">${itemLink(item)}
             <div class="item-meta"><span>Ponderación ${fmtPeso(item.Ponderacion)}</span>${item.FechaEntrega ? `<span>Entrega ${fmtDate(item.FechaEntrega)}</span>` : ''}
             ${entregaBtn(st.ent, `${ico('paperclip', 'icon-sm')} ${state.me.Rol === ROLES.ESTUDIANTE ? 'Ver mi entrega' : 'Ver entrega'}`, 'btn btn-link')}</div></div>
-        <div class="item-side">${st.html}${marcas}
+        <div class="item-side">${st.html}${puntualidadBadge(item, ent)}${marcas}
             ${puedeSubir ? `<button class="btn ${st.ent?.TieneArchivo ? 'btn-ghost' : 'btn-primary'} btn-sm" data-action="upload-entrega" data-item="${esc(item.ItemID)}">${ico('upload')} ${st.ent?.TieneArchivo ? 'Reemplazar archivo' : 'Subir entrega'}</button>` : ''}
             ${seguimiento}
         </div></li>`;
@@ -1553,13 +1636,16 @@ function progressView(estId, { showAudit = false } = {}) {
     const u = idx.users.get(estId);
     const cursos = cursosDe(estId);
     const general = Grades.general(estId);
+    const estados = cursosDe(estId).map(c => estadoFinal(Grades.forStudent(estId, c.CursoID).final, c));
+    const nAprob = estados.filter(e => e === 'aprobado').length, nRepr = estados.filter(e => e === 'reprobado').length;
     const asist = attendanceStats(estId);
     const calificadas = state.db.entregas.filter(e => e.EstudianteID === estId && toNum(e.Nota) != null).length;
 
     const cursoCards = cursos.map(c => {
         const res = Grades.forStudent(estId, c.CursoID);
         return `<section class="card">
-            <div class="card-head"><div><h3>${esc(c.NombreCurso)}</h3><div class="row" style="gap:8px;margin-top:4px"><small class="muted meta-line">${ico('presentation', 'icon-xs')}${esc(tutorDe(c))}</small></div></div><div class="row"><span class="muted">Final</span>${gradePill(res.final)}</div></div>
+            <div class="card-head"><div><h3>${esc(c.NombreCurso)}</h3><div class="row" style="gap:8px;margin-top:4px"><small class="muted meta-line">${ico('presentation', 'icon-xs')}${esc(tutorDe(c))}</small></div></div>
+                <div class="row"><span class="muted">Final</span><span class="grade-pill ${gradeClass(res.final, aprobDe(c.CursoID))}">${fmtNota(res.final)}</span>${estadoBadge(res.final, c)}</div></div>
             ${res.units.length ? `<div class="table-wrap"><table class="table">
                 <thead><tr><th>Unidad</th><th class="num">Peso</th><th style="width:30%">Progreso</th><th class="center">Promedio</th></tr></thead>
                 <tbody>${res.units.map(un => `<tr><td><strong>U${un.numero}</strong> · ${esc(un.nombre)}</td><td class="num">${fmtPeso(un.peso)}</td>
@@ -1575,7 +1661,7 @@ function progressView(estId, { showAudit = false } = {}) {
     <div class="hero">${avatar(u, 'lg')}<div><h2>${esc(u?.Nombre)}</h2>
         <p>${esc(u?.Grado || '')}${u?.FechaNacimiento ? ` · Nac. ${fmtDate(u.FechaNacimiento)}` : ''}</p></div></div>
     <div class="grid grid-kpi">
-        ${kpi('Promedio general', `<span class="grade ${gradeClass(general)}">${fmtNota(general)}</span>`, `Aprobado ≥ ${CONFIG.NOTA_APROBACION}`, 'award')}
+        ${kpi('Promedio general', `<span class="grade ${gradeClass(general)}">${fmtNota(general)}</span>`, `${nAprob} curso(s) aprobado(s) · ${nRepr} reprobado(s)`, 'award')}
         ${kpi('Asistencia', asist.pct == null ? '—' : `${fmtNota(asist.pct)}%`, `${asist.Ausente} ausencia(s)`, 'calendar-check')}
         ${kpi('Cursos', cursos.length, '', 'book-open')}
         ${kpi('Evaluaciones calificadas', calificadas, '', 'circle-check')}
@@ -1872,8 +1958,17 @@ function filasEntregas(it) {
             <td>${ent?.HechaEn ? `<small>${fmtDateTime(ent.HechaEn)}</small>` : '—'}</td>
             <td>${ent?.RevisadaEn ? `<small>${esc(ent.RevisadaPor)}<br>${fmtDateTime(ent.RevisadaEn)}</small>` : '—'}</td>
             <td class="center">${m ? `<input type="checkbox" data-change="recibido" data-item="${esc(it.ItemID)}" data-est="${esc(a.ID)}" ${ent?.RecibidoEn ? 'checked' : ''} aria-label="Recibido de ${esc(a.Nombre)}">` : (ent?.RecibidoEn ? ico('check') : '—')}</td>
-            <td class="center">${gradePill(toNum(ent?.Nota))}</td></tr>`;
+            <td>${puntualidadCelda(it, ent, a, m)}</td>
+            <td class="center">${gradePill(notaEfectiva(it, ent))}</td></tr>`;
     }).join('');
+}
+
+function puntualidadCelda(it, ent, a, m) {
+    const pu = puntualidad(it, ent);
+    if (!pu.entregado) return '<span class="muted">—</span>';
+    if (!pu.tarde) return '<span class="badge badge-success">A tiempo</span>';
+    const boton = m ? `<button class="btn btn-link" data-action="excepcion" data-item="${esc(it.ItemID)}" data-est="${esc(a.ID)}" data-quitar="${pu.excepcion ? '1' : ''}">${pu.excepcion ? 'Retirar excepción' : 'Excepción'}</button>` : '';
+    return `${puntualidadBadge(it, ent)}${boton}`;
 }
 
 function tasaTexto(it) {
@@ -1890,7 +1985,7 @@ async function verEntregas(itemId) {
         submitLabel: 'Listo',
         body: `<p data-tasa>${tasaTexto(it)}</p>
             <p class="muted" style="font-size:13px">Cuenta como entregada si el alumno subió el archivo, si marcaste "Recibido" (entregas en papel o exámenes) o si ya tiene nota.</p>
-            <div class="table-wrap"><table class="table"><thead><tr><th>Estudiante</th><th>Estado</th><th>Archivo</th><th>Hecha (alumno)</th><th>Revisada (padre)</th><th class="center">Recibido</th><th class="center">Nota</th></tr></thead>
+            <div class="table-wrap"><table class="table"><thead><tr><th>Estudiante</th><th>Estado</th><th>Archivo</th><th>Hecha (alumno)</th><th>Revisada (padre)</th><th class="center">Recibido</th><th>Puntualidad</th><th class="center">Nota final</th></tr></thead>
             <tbody data-filas data-item="${esc(it.ItemID)}">${filasEntregas(it)}</tbody></table></div>`,
         onSubmit: async () => true,
     });
@@ -2285,6 +2380,41 @@ const ACTIONS = {
         } catch (e) { toast(e.message, 'error'); el.disabled = false; }
     },
     'ver-entregas': (el) => verEntregas(el.dataset.id),
+    'nota-aprobacion': async (el) => {
+        const c = idx.cursos.get(el.dataset.curso);
+        await openModal({
+            title: `Nota mínima para aprobar · ${c.NombreCurso}`,
+            submitLabel: 'Guardar',
+            body: `<label class="field"><span>Nota mínima (sobre 100) *</span><input type="number" name="NotaAprobacion" min="0" max="100" step="0.01" required value="${esc(aprobDe(c.CursoID))}"></label>
+                <p class="muted" style="font-size:13px">Los resultados, el libro de notas y los perfiles mostrarán "Aprobado" o "Reprobado" según este valor. El cambio queda en la bitácora.</p>`,
+            onSubmit: async (fd) => {
+                await withBusy(() => api('saveCourseSettings', { CursoID: c.CursoID, NotaAprobacion: fd.get('NotaAprobacion') }));
+                toast('Nota mínima actualizada.', 'success');
+                await refresh();
+            },
+        });
+    },
+    'excepcion': async (el) => {
+        const it = idx.items.get(el.dataset.item);
+        const est = idx.users.get(el.dataset.est);
+        const quitar = el.dataset.quitar === '1';
+        const r = await openModal({
+            title: `${quitar ? 'Retirar excepción' : 'Excepción por entrega tarde'} · ${est?.Nombre || ''}`,
+            submitLabel: quitar ? 'Retirar excepción' : 'Conceder excepción',
+            body: `<p><strong>${esc(it.Titulo)}</strong> · ${esc(reglaTexto(it))}</p>
+                <p class="muted" style="font-size:13px">${quitar ? 'Se volverá a aplicar la penalización.' : 'La nota no tendrá penalización por haberse entregado tarde.'} Queda registrado en la bitácora y lo verán los padres.</p>
+                ${justificationField(quitar ? 'Explica por qué se retira la excepción.' : 'Explica el motivo de la excepción (por ejemplo, enfermedad con constancia).')}`,
+            onSubmit: async (fd) => api('setExcepcion', {
+                ItemID: it.ItemID, EstudianteID: est.ID, excepcion: !quitar, justificacion: fd.get('justificacion'),
+            }),
+        });
+        if (r && r !== true && 'Excepcion' in r) {
+            actualizarEntrega(est.ID, it.ItemID, { Excepcion: r.Excepcion });
+            toast(quitar ? 'Excepción retirada.' : 'Excepción concedida.', 'success');
+        }
+        verEntregas(it.ItemID); // vuelve a la lista de entregas (el modal se reemplazó)
+    },
+
     'new-anotacion': async (el) => {
         const est = idx.users.get(el.dataset.est);
         await openModal({
@@ -2359,6 +2489,10 @@ const CHANGES = {
             badge.textContent = `${cupoTexto(marcados)} cupos usados`;
             badge.className = `badge ${marcados >= CONFIG.MAX_ALUMNOS_CURSO ? 'badge-warn' : 'badge-brand'}`;
         }
+    },
+    'penalizacion': (el) => {
+        const box = el.form.querySelector('[data-pct]');
+        if (box) box.hidden = el.value !== 'PORCENTAJE';
     },
     'noticia-alcance': (el) => {
         const box = el.form.querySelector('[data-cursos]');

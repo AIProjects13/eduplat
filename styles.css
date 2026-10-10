@@ -561,6 +561,12 @@ a.course-card:hover, button.course-card:hover { transform: translateY(-3px); box
 .gradebook tfoot td { background: var(--surface-2); font-weight: 700; }
 .gradebook tfoot .sticky-col { background: var(--surface-2); }
 .gradebook .cell { position: relative; }
+.gradebook .cell.is-late .grade-input { border-color: var(--ok); background: var(--ok-bg); }
+.late-dot {
+    position: absolute; left: 3px; top: 3px; width: 15px; height: 15px; border-radius: 50%;
+    background: var(--ok); color: #fff; font-size: 9px; font-weight: 700; line-height: 15px; text-align: center; cursor: help;
+}
+.late-dot.is-exc { background: var(--info); }
 
 .grade-input {
     width: 76px; min-height: 36px; padding: 5px 7px; text-align: center; font-size: 14px; font-weight: 600;

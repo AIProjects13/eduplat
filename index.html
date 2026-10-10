@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="Plataforma Educativa: cursos, tareas, exámenes, notas y asistencia para colegios, profesores, estudiantes y padres.">
+    <meta name="theme-color" content="#0B3D91">
+    <!-- Política de seguridad: solo se ejecuta código propio y de Firebase; solo se conecta a
+         Firebase Auth y a Apps Script. Bloquea scripts inyectados y exfiltración de datos. -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'self';
+        script-src 'self' https://www.gstatic.com;
+        style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
+        font-src https://fonts.gstatic.com;
+        img-src 'self' data: blob:;
+        connect-src https://script.google.com https://script.googleusercontent.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com;
+        frame-src 'none';
+        object-src 'none';
+        base-uri 'self';
+        form-action 'self'">
+    <meta name="referrer" content="no-referrer">
+    <title>Plataforma Educativa</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script src="boot-check.js" defer></script>
+    <script type="module" src="app.js"></script>
+</head>
+
+<body>
+    <noscript>
+        <p class="noscript">La Plataforma Educativa necesita JavaScript habilitado.</p>
+    </noscript>
+
+    <!-- ===================== Pantalla: cargando ===================== -->
+    <div id="screen-loading" class="screen screen-center" role="status" aria-live="polite">
+        <div class="brand brand-lg">
+            <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.42 10.92a1 1 0 0 0-.02-1.84L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.83l8.57 3.91a2 2 0 0 0 1.66 0z"/><path d="M22 10v6"/><path d="M6 12.5V16a6 3 0 0 0 12 0v-3.5"/></svg></span>
+            <span class="brand-name">Plataforma <span>Educativa</span></span>
+        </div>
+        <div class="spinner" aria-hidden="true"></div>
+        <p id="loading-text" class="muted">Cargando…</p>
+    </div>
+
+    <!-- ===================== Pantalla: login ===================== -->
+    <main id="screen-login" class="screen auth-screen" hidden>
+        <section class="auth-card" aria-labelledby="login-title">
+            <div class="brand brand-lg">
+                <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.42 10.92a1 1 0 0 0-.02-1.84L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.83l8.57 3.91a2 2 0 0 0 1.66 0z"/><path d="M22 10v6"/><path d="M6 12.5V16a6 3 0 0 0 12 0v-3.5"/></svg></span>
+                <span class="brand-name">Plataforma <span>Educativa</span></span>
+            </div>
+            <h1 id="login-title">Inicia sesión</h1>
+            <p class="muted">Usa el correo y la contraseña que te entregó la administración.</p>
+
+            <form id="login-form" data-submit="login" class="stack" novalidate>
+                <label class="field">
+                    <span>Correo electrónico</span>
+                    <input type="email" name="email" autocomplete="username" inputmode="email" required>
+                </label>
+                <label class="field">
+                    <span>Contraseña</span>
+                    <span class="password-field">
+                        <input type="password" name="password" autocomplete="current-password" required minlength="6">
+                        <button type="button" class="password-toggle" data-action="toggle-password" aria-label="Mostrar contraseña" aria-pressed="false" title="Mostrar contraseña"><span data-icon="eye"></span></button>
+                    </span>
+                </label>
+                <p class="form-error" role="alert" hidden></p>
+                <button type="submit" class="btn btn-primary btn-block">Entrar</button>
+                <button type="button" class="btn btn-link" data-action="forgot-password">¿Olvidaste tu contraseña?</button>
+            </form>
+        </section>
+        <p class="auth-foot muted">Las cuentas las crea únicamente la administración del colegio.</p>
+    </main>
+
+    <!-- ===================== Pantalla: sin acceso ===================== -->
+    <main id="screen-denied" class="screen auth-screen" hidden>
+        <section class="auth-card">
+            <div class="brand brand-lg">
+                <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.42 10.92a1 1 0 0 0-.02-1.84L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.83l8.57 3.91a2 2 0 0 0 1.66 0z"/><path d="M22 10v6"/><path d="M6 12.5V16a6 3 0 0 0 12 0v-3.5"/></svg></span>
+                <span class="brand-name">Plataforma <span>Educativa</span></span>
+            </div>
+            <h1 id="denied-title">Sin acceso</h1>
+            <p id="denied-text" class="muted"></p>
+            <div id="denied-actions" class="stack"></div>
+            <button type="button" class="btn btn-ghost btn-block" data-action="logout">Cerrar sesión</button>
+        </section>
+    </main>
+
+    <!-- ===================== Pantalla: cambio obligatorio de contraseña ===================== -->
+    <main id="screen-password" class="screen auth-screen" hidden>
+        <section class="auth-card" aria-labelledby="password-title">
+            <div class="brand brand-lg">
+                <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.42 10.92a1 1 0 0 0-.02-1.84L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.83l8.57 3.91a2 2 0 0 0 1.66 0z"/><path d="M22 10v6"/><path d="M6 12.5V16a6 3 0 0 0 12 0v-3.5"/></svg></span>
+                <span class="brand-name">Plataforma <span>Educativa</span></span>
+            </div>
+            <h1 id="password-title">Crea tu contraseña</h1>
+            <p class="muted">Por seguridad, reemplaza la contraseña temporal de <strong id="password-email"></strong> antes de continuar.</p>
+
+            <form id="password-form" data-submit="change-password" class="stack" novalidate>
+                <label class="field">
+                    <span>Nueva contraseña</span>
+                    <span class="password-field">
+                        <input type="password" name="p1" autocomplete="new-password" required minlength="10">
+                        <button type="button" class="password-toggle" data-action="toggle-password" aria-label="Mostrar contraseña" aria-pressed="false" title="Mostrar contraseña"><span data-icon="eye"></span></button>
+                    </span>
+                    <small class="field-hint">Mínimo 10 caracteres, con letras y números.</small>
+                </label>
+                <label class="field">
+                    <span>Repite la contraseña</span>
+                    <span class="password-field">
+                        <input type="password" name="p2" autocomplete="new-password" required minlength="10">
+                        <button type="button" class="password-toggle" data-action="toggle-password" aria-label="Mostrar contraseña" aria-pressed="false" title="Mostrar contraseña"><span data-icon="eye"></span></button>
+                    </span>
+                </label>
+                <p class="form-error" role="alert" hidden></p>
+                <button type="submit" class="btn btn-primary btn-block">Guardar y entrar</button>
+            </form>
+            <button type="button" class="btn btn-ghost btn-block" data-action="logout">Cerrar sesión</button>
+        </section>
+    </main>
+
+    <!-- ===================== Aplicación ===================== -->
+    <div id="screen-app" class="app-shell" hidden>
+        <aside id="sidebar" class="sidebar" aria-label="Navegación principal">
+            <div class="brand">
+                <span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.42 10.92a1 1 0 0 0-.02-1.84L12.83 5.18a2 2 0 0 0-1.66 0L2.6 9.08a1 1 0 0 0 0 1.83l8.57 3.91a2 2 0 0 0 1.66 0z"/><path d="M22 10v6"/><path d="M6 12.5V16a6 3 0 0 0 12 0v-3.5"/></svg></span>
+                <span class="brand-name">Plataforma <span>Educativa</span></span>
+            </div>
+            <nav id="nav" class="nav"></nav>
+            <div class="sidebar-foot">
+                <div id="user-chip" class="user-chip"></div>
+                <button type="button" class="btn btn-ghost btn-sm btn-block" data-action="logout"><span data-icon="log-out"></span>Cerrar sesión</button>
+            </div>
+        </aside>
+        <div class="sidebar-backdrop" data-action="close-sidebar" aria-hidden="true"></div>
+
+        <div class="main">
+            <header class="topbar">
+                <button type="button" class="icon-btn menu-btn" data-action="open-sidebar" aria-label="Abrir menú"><span data-icon="menu"></span></button>
+                <h1 id="page-title" class="page-title"></h1>
+                <button type="button" class="btn btn-ghost btn-sm" data-action="sync" title="Recargar datos"><span data-icon="rotate-cw"></span><span class="hide-sm">Actualizar</span></button>
+            </header>
+            <div id="busy-bar" class="busy-bar" aria-hidden="true"></div>
+            <section id="view" class="view" tabindex="-1"></section>
+        </div>
+    </div>
+
+    <!-- Modal genérico (el contenido lo genera app.js) -->
+    <dialog id="modal" class="modal" aria-modal="true"></dialog>
+
+    <!-- Notificaciones -->
+    <div id="toasts" class="toasts" aria-live="polite" aria-atomic="false"></div>
+</body>
+
+</html>

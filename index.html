@@ -7,14 +7,15 @@
     <meta name="description" content="Plataforma Educativa: cursos, tareas, exámenes, notas y asistencia para colegios, profesores, estudiantes y padres.">
     <meta name="theme-color" content="#0B3D91">
     <!-- Política de seguridad: solo se ejecuta código propio y de Firebase; solo se conecta a
-         Firebase Auth y a Apps Script. Bloquea scripts inyectados y exfiltración de datos. -->
+         Firebase Auth y a las funciones del proyecto (y a los emuladores locales en modo pruebas).
+         Bloquea scripts inyectados y exfiltración de datos. -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'self';
         script-src 'self' https://www.gstatic.com;
         style-src 'self' 'unsafe-inline' https://fonts.googleapis.com;
         font-src https://fonts.gstatic.com;
         img-src 'self' data: blob:;
-        connect-src https://script.google.com https://script.googleusercontent.com https://identitytoolkit.googleapis.com https://securetoken.googleapis.com;
+        connect-src https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://us-central1-plataforma-educativa-729cf.cloudfunctions.net http://127.0.0.1:9099 http://127.0.0.1:5001;
         frame-src 'none';
         object-src 'none';
         base-uri 'self';

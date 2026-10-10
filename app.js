@@ -11,8 +11,11 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js';
 import {
     initializeAuth, browserSessionPersistence, onAuthStateChanged, signInWithEmailAndPassword,
-    signOut, sendPasswordResetEmail, sendEmailVerification, updatePassword,
+    signOut, sendPasswordResetEmail, sendEmailVerification, updatePassword, connectAuthEmulator,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js';
+import {
+    getFunctions, httpsCallable, connectFunctionsEmulator,
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js';
 import { ico, hydrateIcons } from './icons.js';
 
 // ==========================================================================
@@ -21,14 +24,14 @@ import { ico, hydrateIcons } from './icons.js';
 
 const CONFIG = {
     firebase: {
-        apiKey: 'AIzaSyD3P1zTnWwW6VonvZghgVTnb0Eokxr7AzE',
-        authDomain: 'personal-32795.firebaseapp.com',
-        projectId: 'personal-32795',
-        messagingSenderId: '411479894150',
-        appId: '1:411479894150:web:3792309bfe01b025874907',
+        apiKey: 'AIzaSyByeIG0WlV62IsuZvZmBMgPzE5fZXgoAJ8',
+        authDomain: 'plataforma-educativa-729cf.firebaseapp.com',
+        projectId: 'plataforma-educativa-729cf',
+        storageBucket: 'plataforma-educativa-729cf.firebasestorage.app',
+        messagingSenderId: '97714603498',
+        appId: '1:97714603498:web:9be3461511e740a0af1e93',
     },
-    // URL de la implementación "Aplicación web" de Apps Script (termina en /exec).
-    API_URL: 'https://script.google.com/macros/s/AKfycbxrvPhSfFaegI21ELkEDDORLholNrPu_XZPDOMzF1TpBeKPGu4ApFQseQ0zTSApJ3NrRg/exec',
+    FUNCTIONS_REGION: 'us-central1',
     // Entregas: se envían a Apps Script y se guardan en una carpeta PRIVADA de Google Drive.
     MAX_ENTREGA_MB: 10,
     EXTENSIONES: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp',
@@ -59,6 +62,17 @@ hydrateIcons();
 const firebaseApp = initializeApp(CONFIG.firebase);
 // Sesión por pestaña: al cerrar el navegador se cierra la sesión (equipos compartidos).
 const auth = initializeAuth(firebaseApp, { persistence: browserSessionPersistence });
+const functions = getFunctions(firebaseApp, CONFIG.FUNCTIONS_REGION);
+
+// Modo pruebas: en tu PC, abre http://localhost:5600/?emulador=1 para usar los emuladores locales.
+const USA_EMULADOR = ['localhost', '127.0.0.1'].includes(location.hostname)
+    && new URLSearchParams(location.search).has('emulador');
+if (USA_EMULADOR) {
+    connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+    connectFunctionsEmulator(functions, '127.0.0.1', 5001);
+    console.info('[Plataforma] Modo emulador: los datos son de prueba y viven solo en tu PC.');
+}
+const callApi = httpsCallable(functions, 'api', { timeout: 120000 });
 
 // ==========================================================================
 // 2. ESTADO E ÍNDICES
@@ -288,34 +302,28 @@ const MSG = {
 const READ_ACTIONS = new Set(['getSnapshot', 'getEntregaFile', 'verifyAudit']);
 
 async function api(action, payload = {}, { forceRefresh = false, retried = false } = {}) {
-    if (CONFIG.API_URL.includes('REEMPLAZA')) {
-        console.error('[Plataforma] CONFIG.API_URL no está configurada en app.js');
-        throw new ApiError('CONFIG', MSG.CONFIG);
-    }
-    const idToken = await auth.currentUser?.getIdToken(forceRefresh);
-    if (!idToken) throw new ApiError('UNAUTHENTICATED', 'Tu sesión no está iniciada.');
+    if (!auth.currentUser) throw new ApiError('UNAUTHENTICATED', 'Tu sesión no está iniciada.');
+    // El token viaja automáticamente con la llamada; se renueva cuando se pide (p. ej. tras cambiar la contraseña).
+    if (forceRefresh) await auth.currentUser.getIdToken(true);
 
-    let res;
+    let json;
     try {
-        // text/plain evita el preflight CORS (el backend no lo soporta).
-        res = await fetch(CONFIG.API_URL, {
-            method: 'POST',
-            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-            body: JSON.stringify({ action, payload, idToken }),
-        });
+        json = (await callApi({ action, payload })).data;
     } catch (e) {
-        console.error(`[Plataforma] Falló la conexión (${action}):`, e);
+        console.error(`[Plataforma] Falló la llamada (${action}):`, e);
+        if (e?.code === 'functions/unauthenticated') {
+            if (state.me) setTimeout(() => signOut(auth), 1500);
+            throw new ApiError('UNAUTHENTICATED', 'Tu sesión expiró o no es válida. Vuelve a iniciar sesión.');
+        }
         throw new ApiError('NETWORK', MSG.NETWORK);
     }
-    const text = await res.text().catch(() => '');
-    let json;
-    try { json = JSON.parse(text); } catch {
-        console.error(`[Plataforma] Respuesta no válida del backend (${action}) · HTTP ${res.status} ${res.url}\n`, text.slice(0, 1500));
+    if (!json || typeof json !== 'object') {
+        console.error(`[Plataforma] Respuesta no válida del backend (${action}):`, json);
         throw new ApiError('BAD_RESPONSE', MSG.BAD_RESPONSE);
     }
     // Respuesta "ok" pero sin datos: no es la respuesta de la acción pedida.
     if (json.ok && !Object.prototype.hasOwnProperty.call(json, 'data')) {
-        console.error(`[Plataforma] Respuesta incompleta del backend (${action}) · HTTP ${res.status} ${res.url}\n`, text.slice(0, 500));
+        console.error(`[Plataforma] Respuesta incompleta del backend (${action}):`, json);
         if (!retried && READ_ACTIONS.has(action)) return api(action, payload, { forceRefresh, retried: true });
         throw new ApiError('BAD_RESPONSE', MSG.BAD_RESPONSE);
     }

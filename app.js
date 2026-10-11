@@ -89,6 +89,7 @@ const emptyDb = () => ({
     users: [], cursos: [], unidades: [], pensum: [], items: [], inscripciones: [],
     entregas: [], asistencia: [], auditoria: [], bitacora: [],
     noticias: [], lecturas: [], anotaciones: [], eventos: [],
+    conversaciones: [], restricciones: [], contactosAdmin: [], materiales: [],
 });
 
 const state = {
@@ -134,8 +135,15 @@ function buildIndex() {
         (+a.Unidad - +b.Unidad) || String(a.FechaEntrega).localeCompare(String(b.FechaEntrega)) ||
         String(a.Titulo).localeCompare(String(b.Titulo), 'es'));
 
+    // La administración es contacto de todos (para mensajes), aunque no venga en "users".
+    const users = new Map(db.contactosAdmin.map(u => [u.ID, u]));
+    db.users.forEach(u => users.set(u.ID, u));
+    const materiales = [...db.materiales].sort((a, b) => String(a.Fecha).localeCompare(String(b.Fecha)));
+
     idx = {
-        users: new Map(db.users.map(u => [u.ID, u])),
+        users,
+        materialesByCurso: groupBy(materiales.filter(m => !m.ItemID), 'CursoID'),
+        adjuntosByItem: groupBy(materiales.filter(m => m.ItemID), 'ItemID'),
         cursos: new Map(db.cursos.map(c => [c.CursoID, c])),
         items: new Map(items.map(i => [i.ItemID, i])),
         itemsByCurso: groupBy(items, 'CursoID'),
@@ -330,7 +338,7 @@ const MSG = {
 };
 
 // Acciones de solo lectura: es seguro reintentarlas si la respuesta llega incompleta.
-const READ_ACTIONS = new Set(['getSnapshot', 'getEntregaFile', 'verifyAudit', 'getNoticiaFoto', 'noticiaDetalle']);
+const READ_ACTIONS = new Set(['getSnapshot', 'getEntregaFile', 'verifyAudit', 'getNoticiaFoto', 'noticiaDetalle', 'getMensajes', 'getMaterialFile', 'marcarLeida']);
 
 async function api(action, payload = {}, { forceRefresh = false, retried = false } = {}) {
     if (!auth.currentUser) throw new ApiError('UNAUTHENTICATED', 'Tu sesión no está iniciada.');
@@ -430,7 +438,8 @@ function programarRecarga(ms) {
 
 function ocupado() {
     const activo = document.activeElement;
-    const editando = activo && $('#view').contains(activo) && activo.matches('input, textarea, select, [contenteditable]');
+    // Escribir en el chat no bloquea: lo escrito se conserva al recargar.
+    const editando = activo && $('#view').contains(activo) && activo.matches('input, textarea, select, [contenteditable]') && !activo.closest('.chat-compose');
     return hasUnsavedWork() || $('#modal').open || state.busy > 0 || editando || document.hidden;
 }
 
@@ -442,9 +451,14 @@ async function recargarSiSePuede() {
     try {
         await withBusy(loadSnapshot);
         if (ocupado()) { senal.pendiente = true; return programarRecarga(2500); }   // empezó a escribir mientras cargaba
+        const borrador = $('.chat-compose textarea');
+        const texto = borrador?.value || '', conFoco = borrador && document.activeElement === borrador;
         renderChrome();
         render();
         window.scrollTo(0, y);
+        const nuevo = $('.chat-compose textarea');
+        if (nuevo && texto) nuevo.value = texto;
+        if (nuevo && conFoco) nuevo.focus();
     } catch (e) {
         if (!(e instanceof ApiError)) console.error('[Plataforma] Error al actualizar:', e);
     }
@@ -541,26 +555,31 @@ function attendanceStats(estId, cursoId = null) {
 // ==========================================================================
 
 /** Menú por categorías (acordeones). Cada entrada: [vista, etiqueta, ícono]. */
+/** Menú por categorías (acordeones). Cada entrada: [vista, etiqueta, ícono]. */
+const COMUNICACION = ['Comunicación', [['muro', 'Muro', 'newspaper'], ['mensajes', 'Mensajes', 'message-square'], ['agenda', 'Agenda', 'calendar-days']]];
 const NAV = {
     ADMIN: [
-        ['General', [['dashboard', 'Resumen', 'layout-dashboard'], ['muro', 'Muro', 'newspaper'], ['agenda', 'Agenda', 'calendar-days']]],
+        ['General', [['dashboard', 'Resumen', 'layout-dashboard']]],
+        COMUNICACION,
         ['Académico', [['grados', 'Grados', 'school'], ['cursos', 'Cursos', 'book-open'], ['calificaciones', 'Calificaciones', 'clipboard-list'], ['asistencia', 'Asistencia', 'calendar-check']]],
         ['Administración', [['usuarios', 'Usuarios', 'users'], ['auditoria', 'Auditoría', 'history']]],
         ['Mi cuenta', [['perfil', 'Mi perfil', 'circle-user']]],
     ],
     TUTOR: [
-        ['General', [['dashboard', 'Resumen', 'layout-dashboard'], ['muro', 'Muro', 'newspaper'], ['agenda', 'Agenda', 'calendar-days']]],
+        ['General', [['dashboard', 'Resumen', 'layout-dashboard']]],
+        COMUNICACION,
         ['Mis clases', [['grados', 'Grados', 'school'], ['cursos', 'Mis cursos', 'book-open'], ['usuarios', 'Mis estudiantes', 'graduation-cap']]],
         ['Evaluación', [['calificaciones', 'Calificaciones', 'clipboard-list'], ['asistencia', 'Asistencia', 'calendar-check'], ['auditoria', 'Bitácora', 'history']]],
         ['Mi cuenta', [['perfil', 'Mi perfil', 'circle-user']]],
     ],
     ESTUDIANTE: [
-        ['General', [['muro', 'Muro', 'newspaper'], ['inicio', 'Inicio', 'house'], ['agenda', 'Agenda', 'calendar-days']]],
+        ['General', [['inicio', 'Inicio', 'house']]],
+        COMUNICACION,
         ['Mis estudios', [['mis-cursos', 'Mis cursos', 'book-open'], ['mi-asistencia', 'Asistencia', 'calendar-check']]],
         ['Mi cuenta', [['perfil', 'Mi perfil', 'circle-user']]],
     ],
     PADRE: [
-        ['General', [['muro', 'Muro', 'newspaper'], ['agenda', 'Agenda', 'calendar-days']]],
+        COMUNICACION,
         ['Mis hijos', [['progreso', 'Progreso', 'trending-up']]],
     ],
 };
@@ -580,6 +599,7 @@ const VIEWS = {
     grados:          { roles: T, title: () => 'Grados', render: viewGrados },
     grado:           { roles: T, nav: 'grados', title: g => g || 'Grado', render: viewGrado },
     agenda:          { roles: [ROLES.ADMIN, ROLES.TUTOR, ROLES.ESTUDIANTE, ROLES.PADRE], title: () => 'Agenda', render: viewAgenda, after: agendaAfter },
+    mensajes:        { roles: [ROLES.ADMIN, ROLES.TUTOR, ROLES.ESTUDIANTE, ROLES.PADRE], title: () => 'Mensajes', render: viewMensajes, after: mensajesAfter },
     inicio:          { roles: E, title: () => 'Inicio', render: viewStudentHome },
     'mis-cursos':    { roles: E, title: () => 'Mis cursos', render: viewStudentCursos },
     'mi-asistencia': { roles: E, title: () => 'Mi asistencia', render: viewStudentAsistencia },
@@ -677,9 +697,10 @@ function renderChrome() {
         return `<div class="nav-group${abierto ? ' is-open' : ''}" data-group="${esc(grupo)}">
             <button type="button" class="nav-group-head" data-action="nav-group" aria-expanded="${abierto}"><span>${esc(grupo)}</span>${ico('chevron-down', 'icon-sm')}</button>
             <div class="nav-group-body"><div>${links.map(([v, label, icon]) =>
-                `<a class="nav-link" href="#/${v}" data-view="${v}"><span class="nav-icon">${ico(icon)}</span>${esc(label)}</a>`).join('')}</div></div>
+                `<a class="nav-link" href="#/${v}" data-view="${v}"><span class="nav-icon">${ico(icon)}</span>${esc(label)}${v === 'mensajes' ? '<span class="nav-badge" data-nav-badge hidden></span>' : ''}</a>`).join('')}</div></div>
         </div>`;
     }).join('');
+    actualizarInsignia();
     aplicarMenuOculto();
     $('#user-chip').innerHTML = `${avatar(me)}<div><strong>${esc(me.Nombre)}</strong>${roleBadge(me.Rol)}</div>`;
 }
@@ -992,10 +1013,10 @@ async function openCourseModal(c = null) {
 function viewCursoDetalle(cursoId) {
     const c = idx.cursos.get(cursoId);
     if (!c) return `<section class="card">${emptyState('El curso no existe.', 'search', '<a class="btn btn-ghost" href="#/cursos">Volver a cursos</a>')}</section>`;
-    const tabs = [['evaluaciones', 'Evaluaciones'], ['resultados', 'Resultados'], ['unidades', 'Unidades y ponderación'], ['pensum', 'Pensum'], ['estudiantes', 'Estudiantes']];
+    const tabs = [['evaluaciones', 'Evaluaciones'], ['material', 'Material de apoyo'], ['resultados', 'Resultados'], ['unidades', 'Unidades y ponderación'], ['pensum', 'Pensum'], ['estudiantes', 'Estudiantes']];
     const tab = state.cursoTab;
     const m = canManage(c.CursoID);
-    const body = { evaluaciones: cursoEvaluaciones, resultados: cursoResultados, unidades: cursoUnidades, pensum: cursoPensum, estudiantes: cursoEstudiantes }[tab](c, m);
+    const body = { evaluaciones: cursoEvaluaciones, material: cursoMaterial, resultados: cursoResultados, unidades: cursoUnidades, pensum: cursoPensum, estudiantes: cursoEstudiantes }[tab](c, m);
     return `
     <div class="row-between">
         <div><a class="btn btn-link" href="#/cursos">${ico('arrow-left')} Cursos</a>
@@ -1151,8 +1172,10 @@ function cursoEvaluaciones(c, m) {
                     return `<li class="item-row">
                         ${tipoBadge(i.Tipo)}
                         <div class="item-main">${itemLink(i)}
-                            <div class="item-meta"><span>Ponderación ${fmtPeso(i.Ponderacion)}</span>${i.FechaEntrega ? `<span>Entrega ${fmtDate(i.FechaEntrega)}</span>` : ''}${i.PenalizacionTipo && i.PenalizacionTipo !== 'NINGUNA' ? `<span>${esc(reglaTexto(i))}</span>` : ''}<span class="${t.pct === 100 ? 'grade good' : ''}">Entregas ${t.n}/${t.total}${t.pct != null ? ` (${fmtNota(t.pct)}%)` : ''}</span></div></div>
-                        <div class="item-side">
+                            <div class="item-meta"><span>Ponderación ${fmtPeso(i.Ponderacion)}</span>${i.FechaEntrega ? `<span>Entrega ${fmtDate(i.FechaEntrega)}</span>` : ''}${i.PenalizacionTipo && i.PenalizacionTipo !== 'NINGUNA' ? `<span>${esc(reglaTexto(i))}</span>` : ''}<span class="${t.pct === 100 ? 'grade good' : ''}">Entregas ${t.n}/${t.total}${t.pct != null ? ` (${fmtNota(t.pct)}%)` : ''}</span></div>
+                            ${adjuntosHtml(i, m)}</div>
+                        <div class="item-side">${m ? `
+                            <button class="btn btn-ghost btn-sm" data-action="new-material" data-curso="${esc(i.CursoID)}" data-item="${esc(i.ItemID)}" title="Adjuntar hoja de trabajo, enunciado o enlace">${ico('paperclip')} Adjuntar</button>` : ''}
                             <button class="btn btn-ghost btn-sm" data-action="ver-entregas" data-id="${esc(i.ItemID)}">${ico('check-check')} Entregas</button>${m ? `
                             <button class="icon-btn" data-action="edit-item" data-id="${esc(i.ItemID)}" aria-label="Editar evaluación" title="Editar">${ico('pencil')}</button>
                             <button class="icon-btn danger" data-action="delete-item" data-id="${esc(i.ItemID)}" aria-label="Eliminar evaluación" title="Eliminar">${ico('trash')}</button>` : ''}
@@ -1660,12 +1683,14 @@ function viewStudentCursos() {
     <section class="card">
         <div class="card-head"><div><h2>${esc(c.NombreCurso)}</h2><p class="muted" style="font-size:14px">${esc(c.Descripcion || '')}</p></div>
             <div class="row"><span class="muted">Promedio</span><span class="grade-big grade ${gradeClass(res.final)}">${fmtNota(res.final)}</span></div></div>
+        ${materialLista(c.CursoID, 0, false, true)}
         ${res.units.map(u => {
             const temas = pensum.filter(p => +p.Unidad === u.numero);
             return `<div class="unit-block">
                 <div class="unit-head"><h3>U${u.numero} · ${esc(u.nombre)} <small class="muted">(${fmtPeso(u.peso)})</small></h3>
                     <span>Promedio ${gradePill(u.promedio)}</span></div>
                 ${temas.length ? `<ul class="topic-list">${temas.map(t => `<li><strong>${esc(t.Tema)}</strong>${t.Detalle ? ` — <small>${esc(t.Detalle)}</small>` : ''}</li>`).join('')}</ul>` : ''}
+                ${materialLista(c.CursoID, u.numero, false, true)}
                 ${u.items.length ? `<ul class="item-list">${u.items.map(i => studentItemRow(i, me.ID)).join('')}</ul>` : ''}
             </div>`;
         }).join('') || emptyState('Tu tutor aún no ha publicado evaluaciones.', 'clipboard-list')}
@@ -1698,7 +1723,8 @@ function studentItemRow(item, estId) {
         ${tipoBadge(item.Tipo)}
         <div class="item-main">${itemLink(item)}
             <div class="item-meta"><span>Ponderación ${fmtPeso(item.Ponderacion)}</span>${item.FechaEntrega ? `<span>Entrega ${fmtDate(item.FechaEntrega)}</span>` : ''}
-            ${entregaBtn(st.ent, `${ico('paperclip', 'icon-sm')} ${state.me.Rol === ROLES.ESTUDIANTE ? 'Ver mi entrega' : 'Ver entrega'}`, 'btn btn-link')}</div></div>
+            ${entregaBtn(st.ent, `${ico('paperclip', 'icon-sm')} ${state.me.Rol === ROLES.ESTUDIANTE ? 'Ver mi entrega' : 'Ver entrega'}`, 'btn btn-link')}</div>
+            ${adjuntosHtml(item, false)}</div>
         <div class="item-side">${st.html}${puntualidadBadge(item, ent)}${marcas}
             ${puedeSubir ? `<button class="btn ${st.ent?.TieneArchivo ? 'btn-ghost' : 'btn-primary'} btn-sm" data-action="upload-entrega" data-item="${esc(item.ItemID)}">${ico('upload')} ${st.ent?.TieneArchivo ? 'Reemplazar archivo' : 'Subir entrega'}</button>` : ''}
             ${seguimiento}
@@ -1766,6 +1792,8 @@ function progressView(estId, { showAudit = false } = {}) {
             <details class="more"><summary>Ver notas por evaluación</summary>
                 <ul class="item-list">${res.units.flatMap(un => un.items).map(i => studentItemRow(i, estId)).join('')}</ul>
             </details>` : emptyState('Sin evaluaciones todavía.', 'clipboard-list')}
+            ${(idx.materialesByCurso.get(c.CursoID) || []).length ? `<details class="more"><summary>Material de apoyo (${idx.materialesByCurso.get(c.CursoID).length})</summary>
+                ${materialLista(c.CursoID, null, false)}</details>` : ''}
         </section>`;
     }).join('');
 
@@ -1832,6 +1860,10 @@ function tasaEntrega(item) {
 
 function alcanceTexto(n) {
     if (n.Alcance === 'COLEGIO') return 'Todo el colegio';
+    if (n.Alcance === 'ALUMNOS') {
+        const nombres = (n.EstudianteIDs || []).map(id => idx.users.get(id)?.Nombre).filter(Boolean).join(', ') || 'alumnos específicos';
+        return n.Tipo === 'CITA' ? `Padres de ${nombres}` : nombres;
+    }
     const nombres = (n.CursoIDs || []).map(id => idx.cursos.get(id)?.NombreCurso).filter(Boolean);
     return nombres.length ? nombres.join(', ') : 'Cursos específicos';
 }
@@ -1878,7 +1910,14 @@ function itemAtencion(badge, titulo, detalle, botones) {
 function atencionItems() {
     const out = [];
     const rol = state.me.Rol;
+    const sinLeer = convsSinLeer();
+    if (sinLeer.length) out.push(itemAtencion(`<span class="badge badge-info">${ico('message-square')}Mensajes</span>`,
+        `${sinLeer.length} conversación(es) con mensajes nuevos`, sinLeer.slice(0, 3).map(c => `<span>${esc(convTitulo(c))}</span>`).join(''),
+        `<a class="btn btn-primary btn-sm" href="#/mensajes/${encodeURIComponent(sinLeer[0].ConvID)}">Leer</a>`));
     if (rol === ROLES.PADRE) {
+        citasPendientes().forEach(e => out.push(itemAtencion(`<span class="badge badge-brand">${ico('calendar')}Cita</span>`, esc(e.Titulo),
+            `<span>${esc(cuandoEvento(e))}</span><span>${esc(e.AutorNombre)}</span>`,
+            `<button class="btn btn-primary btn-sm" data-action="ver-evento" data-tipo="evento" data-id="${esc(e.EventoID)}">Responder</button>`)));
         state.db.noticias.filter(n => n.Obligatoria && !miLectura(n.NoticiaID)).forEach(n => out.push(itemAtencion(
             `<span class="badge badge-danger">${ico('bell')}Obligatoria</span>`, esc(n.Titulo), `<span>${esc(n.AutorNombre)}</span><span>${fmtDate(n.PublicadaEn)}</span>`,
             `<button class="btn btn-primary btn-sm" data-action="leer-noticia" data-id="${esc(n.NoticiaID)}">${ico('check-check')} Leído y entendido</button>`)));
@@ -2303,7 +2342,7 @@ function ocurrencias(desde, hasta) {
         if (fin < desde || e.Fecha > hasta) continue;
         const varios = fin !== e.Fecha;
         for (let d = e.Fecha > desde ? e.Fecha : desde; d <= fin && d <= hasta; d = sumarDias(d, 1)) {
-            out.push({ tipo: 'evento', id: e.EventoID, fecha: d, titulo: e.Titulo, color: e.Color || 'azul',
+            out.push({ tipo: 'evento', id: e.EventoID, fecha: d, titulo: e.Tipo === 'CITA' ? `Cita: ${e.Titulo}` : e.Titulo, color: e.Color || 'azul',
                 todoElDia: !!e.TodoElDia || varios, ini: e.HoraInicio, fin: e.HoraFin, lugar: e.Lugar });
         }
     }
@@ -2483,6 +2522,17 @@ function cuandoEvento(e) {
         : `${fechaLarga(e.Fecha)} · ${horas}`;
 }
 
+const RESPUESTA_CITA = { ASISTIRE: '<span class="badge badge-success">Asistirá</span>', NO_PUEDO: '<span class="badge badge-danger">No puede</span>' };
+const MODALIDAD_TXT = { PRESENCIAL: 'En persona', LLAMADA: 'Por llamada' };
+
+/** Padres invitados a una cita (los que la app conoce). */
+function padresDeCita(e) {
+    const ids = new Set(e.EstudianteIDs || []);
+    return state.db.users.filter(u => u.Rol === ROLES.PADRE && String(u.HijosIDs || '').split(',').some(h => ids.has(h)));
+}
+
+const citasPendientes = () => state.db.eventos.filter(e => e.Tipo === 'CITA' && e.Fecha >= today() && !e.Respuestas?.[state.me.ID]);
+
 async function verEvento(tipo, id) {
     if (tipo === 'entrega') {
         const it = idx.items.get(id);
@@ -2495,7 +2545,7 @@ async function verEvento(tipo, id) {
             body: `<p class="row">${tipoBadge(it.Tipo)}<strong>${esc(c?.NombreCurso || '')}</strong></p>
                 <p class="meta-line">${ico('clock', 'icon-sm')} Fecha de entrega: ${esc(fechaLarga(it.FechaEntrega))}</p>
                 <p class="muted">Ponderación ${fmtPeso(it.Ponderacion)}${it.PenalizacionTipo && it.PenalizacionTipo !== 'NINGUNA' ? ` · ${esc(reglaTexto(it))}` : ''}</p>
-                ${it.Descripcion ? `<p class="news-text">${esc(it.Descripcion)}</p>` : ''}`,
+                ${it.Descripcion ? `<p class="news-text">${esc(it.Descripcion)}</p>` : ''}${adjuntosHtml(it, false)}`,
             onSubmit: async () => (gestiona ? 'entregas' : true),
         });
         if (r === 'entregas') verEntregas(id);
@@ -2504,66 +2554,445 @@ async function verEvento(tipo, id) {
     const e = state.db.eventos.find(x => x.EventoID === id);
     if (!e) return;
     const gestiona = isAdmin() || e.AutorID === state.me.ID;
+    const cita = e.Tipo === 'CITA';
+    let extra = '';
+    if (cita) {
+        const donde = e.Modalidad === 'LLAMADA'
+            ? `<p class="meta-line">${ico('message-square', 'icon-sm')} ${MODALIDAD_TXT.LLAMADA}: ${esc(e.Contacto)}</p>`
+            : `<p class="meta-line">${ico('map-pin', 'icon-sm')} ${MODALIDAD_TXT.PRESENCIAL}${e.Lugar ? ` · ${esc(e.Lugar)}` : ''}</p>`;
+        if (esPadre()) {
+            const mia = e.Respuestas?.[state.me.ID];
+            extra = `${donde}<div class="cita-respuesta">
+                ${mia ? `<p>Tu respuesta: ${RESPUESTA_CITA[mia.Respuesta]}${mia.Comentario ? ` · <em>${esc(mia.Comentario)}</em>` : ''}</p>` : '<p><strong>Confirma si podrás asistir.</strong></p>'}
+                <div class="row"><button type="button" class="btn btn-primary btn-sm" data-action="responder-cita" data-id="${esc(e.EventoID)}" data-r="ASISTIRE">${ico('check')} Asistiré</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-action="responder-cita" data-id="${esc(e.EventoID)}" data-r="NO_PUEDO">No puedo</button></div></div>`;
+        } else {
+            const padres = padresDeCita(e);
+            extra = `${donde}<h3 style="margin:14px 0 6px;font-size:15px">Respuestas de los padres</h3>
+                ${padres.length ? `<ul class="item-list">${padres.map(pd => {
+                    const r = e.Respuestas?.[pd.ID];
+                    return `<li class="item-row">${avatar(pd, 'sm')}<div class="item-main"><strong>${esc(pd.Nombre)}</strong>${r?.Comentario ? `<div class="item-meta"><span>${esc(r.Comentario)}</span></div>` : ''}</div>
+                        <div class="item-side">${r ? `${RESPUESTA_CITA[r.Respuesta]}<small class="muted">${fmtDateTime(r.Fecha)}</small>` : '<span class="badge">Sin responder</span>'}</div></li>`;
+                }).join('')}</ul>` : '<p class="muted">Sin padres registrados.</p>'}`;
+        }
+    }
     const r = await openModal({
-        title: e.Titulo,
+        title: cita ? `Cita: ${e.Titulo}` : e.Titulo,
+        wide: cita,
         submitLabel: gestiona ? 'Editar' : 'Cerrar',
         body: `<p class="meta-line"><span class="ev-dot ev-${esc(e.Color || 'azul')}"></span>${ico('clock', 'icon-sm')} ${esc(cuandoEvento(e))}</p>
-            ${e.Lugar ? `<p class="meta-line">${ico('map-pin', 'icon-sm')} ${esc(e.Lugar)}</p>` : ''}
+            ${!cita && e.Lugar ? `<p class="meta-line">${ico('map-pin', 'icon-sm')} ${esc(e.Lugar)}</p>` : ''}
             ${e.Descripcion ? `<p class="news-text">${esc(e.Descripcion)}</p>` : ''}
+            ${extra}
             <p class="muted" style="font-size:13px">Para: ${esc(alcanceTexto(e))} · Creado por ${esc(e.AutorNombre)}</p>
-            ${gestiona ? `<button type="button" class="btn btn-ghost btn-sm" data-action="delete-evento" data-id="${esc(e.EventoID)}">${ico('trash', 'icon-sm')} Eliminar evento</button>` : ''}`,
+            ${gestiona ? `<button type="button" class="btn btn-ghost btn-sm" data-action="delete-evento" data-id="${esc(e.EventoID)}">${ico('trash', 'icon-sm')} Eliminar ${cita ? 'cita' : 'evento'}</button>` : ''}`,
         onSubmit: async () => (gestiona ? 'editar' : true),
     });
     if (r === 'editar') openEventoModal(e);
 }
 
-async function openEventoModal(e = null, { fecha = '', hora = '' } = {}) {
+/** Alumnos que quien crea el evento puede elegir (el maestro: los de sus cursos). */
+function alumnosElegibles() {
+    if (isAdmin()) return students();
+    return [...new Map(cursosGestionables().flatMap(c => alumnosDe(c.CursoID)).map(a => [a.ID, a])).values()].sort(byName);
+}
+
+async function openEventoModal(e = null, { fecha = '', hora = '', tipo = '', estIds = [] } = {}) {
     const cursos = cursosGestionables();
-    const alcance = e?.Alcance || 'COLEGIO';
+    const t = e?.Tipo || tipo || 'EVENTO';
+    const alcance = e?.Alcance || (estIds.length ? 'ALUMNOS' : 'COLEGIO');
     const sel = new Set(e?.CursoIDs || []);
-    const todo = e ? !!e.TodoElDia : !hora;
+    const selA = new Set(e?.EstudianteIDs || estIds);
+    const todo = t === 'CITA' ? false : (e ? !!e.TodoElDia : !hora);
     const f = e?.Fecha || fecha || agenda().fecha || today();
-    const ini = e?.HoraInicio || hora || '08:00';
+    const ini = e?.HoraInicio || hora || (t === 'CITA' ? '15:00' : '08:00');
     const finDef = e?.HoraFin || `${String(Math.min(23, aMin(ini) / 60 + 1 | 0)).padStart(2, '0')}:${ini.slice(3, 5) || '00'}`;
-    const color = e?.Color || 'azul';
+    const color = e?.Color || (t === 'CITA' ? 'morado' : 'azul');
+    const modalidad = e?.Modalidad || 'PRESENCIAL';
+    const alumnos = alumnosElegibles();
+    const conPadres = new Set(state.db.users.filter(u => u.Rol === ROLES.PADRE).flatMap(u => String(u.HijosIDs || '').split(',')));
+    const esCita = t === 'CITA';
     await openModal({
-        title: e ? 'Editar evento' : 'Nuevo evento',
+        title: e ? (esCita ? 'Editar cita' : 'Editar evento') : (esCita ? 'Nueva cita con padres' : 'Nuevo evento'),
         wide: true,
-        submitLabel: e ? 'Guardar cambios' : 'Crear evento',
-        body: `<div class="form-grid">
-            <label class="field span-all"><span>Título *</span><input name="Titulo" required maxlength="160" value="${esc(e?.Titulo)}" placeholder="Ej.: Reunión de padres"></label>
+        submitLabel: e ? 'Guardar cambios' : (esCita ? 'Crear cita' : 'Crear evento'),
+        body: `<div class="form-grid" data-evento-form>
+            ${e ? `<input type="hidden" name="Tipo" value="${t}">` : `<fieldset class="field span-all" style="border:0;padding:0;margin:0"><span>¿Qué vas a crear?</span>
+                <div class="segmented" role="radiogroup" aria-label="Tipo">
+                    <label><input type="radio" name="Tipo" value="EVENTO" data-change="evento-tipo" ${!esCita ? 'checked' : ''}><span>Evento</span></label>
+                    <label><input type="radio" name="Tipo" value="CITA" data-change="evento-tipo" ${esCita ? 'checked' : ''}><span>Cita con padres</span></label>
+                </div></fieldset>`}
+            <label class="field span-all"><span>Título *</span><input name="Titulo" required maxlength="160" value="${esc(e?.Titulo)}" placeholder="${esCita ? 'Ej.: Reunión sobre el rendimiento de Ana' : 'Ej.: Reunión de padres'}"></label>
             <label class="field"><span>Fecha *</span><input type="date" name="Fecha" required value="${esc(f)}"></label>
-            <label class="field"><span>Termina (si dura varios días)</span><input type="date" name="FechaFin" value="${esc(e?.FechaFin && e.FechaFin !== e.Fecha ? e.FechaFin : '')}"></label>
-            <label class="check-item span-all"><input type="checkbox" name="TodoElDia" data-change="evento-todo" ${todo ? 'checked' : ''}><span><strong>Todo el día</strong></span></label>
-            <label class="field" data-horas ${todo ? 'hidden' : ''}><span>Hora de inicio</span><input type="time" name="HoraInicio" value="${esc(ini)}"></label>
+            <label class="field" data-solo-evento ${esCita ? 'hidden' : ''}><span>Termina (si dura varios días)</span><input type="date" name="FechaFin" value="${esc(e?.FechaFin && e.FechaFin !== e.Fecha ? e.FechaFin : '')}"></label>
+            <label class="check-item span-all" data-solo-evento ${esCita ? 'hidden' : ''}><input type="checkbox" name="TodoElDia" data-change="evento-todo" ${todo ? 'checked' : ''}><span><strong>Todo el día</strong></span></label>
+            <label class="field" data-horas ${todo ? 'hidden' : ''}><span>Hora de inicio *</span><input type="time" name="HoraInicio" value="${esc(ini)}"></label>
             <label class="field" data-horas ${todo ? 'hidden' : ''}><span>Hora de fin</span><input type="time" name="HoraFin" value="${esc(finDef)}"></label>
-            <label class="field span-all"><span>Lugar</span><input name="Lugar" maxlength="160" value="${esc(e?.Lugar)}" placeholder="Ej.: Salón de actos"></label>
+            <fieldset class="field span-all" data-solo-cita style="border:0;padding:0;margin:0" ${esCita ? '' : 'hidden'}><span>Modalidad *</span>
+                <div class="segmented" role="radiogroup" aria-label="Modalidad">
+                    <label><input type="radio" name="Modalidad" value="PRESENCIAL" data-change="evento-modalidad" ${modalidad === 'PRESENCIAL' ? 'checked' : ''}><span>En persona</span></label>
+                    <label><input type="radio" name="Modalidad" value="LLAMADA" data-change="evento-modalidad" ${modalidad === 'LLAMADA' ? 'checked' : ''}><span>Por llamada</span></label>
+                </div></fieldset>
+            <label class="field span-all" data-lugar ${esCita && modalidad === 'LLAMADA' ? 'hidden' : ''}><span>Lugar</span><input name="Lugar" maxlength="160" value="${esc(e?.Lugar)}" placeholder="Ej.: Salón de actos"></label>
+            <label class="field span-all" data-contacto ${esCita && modalidad === 'LLAMADA' ? '' : 'hidden'}><span>Teléfono o enlace de la llamada *</span><input name="Contacto" maxlength="300" value="${esc(e?.Contacto)}" placeholder="Ej.: 5555-1234 o el enlace de la videollamada"></label>
             <label class="field span-all"><span>Descripción</span><textarea name="Descripcion" maxlength="2000" rows="3">${esc(e?.Descripcion)}</textarea></label>
-            <fieldset class="field span-all" style="border:0;padding:0;margin:0"><span>Color</span>
+            <fieldset class="field span-all" data-solo-evento style="border:0;padding:0;margin:0" ${esCita ? 'hidden' : ''}><span>Color</span>
                 <div class="ev-colors">${AG_COLORES.map(([v, l]) => `<label class="ev-color" title="${l}"><input type="radio" name="Color" value="${v}" ${color === v ? 'checked' : ''}><span class="ev-swatch ev-${v}"></span><span class="sr-only">${l}</span></label>`).join('')}</div>
             </fieldset>
-            <fieldset class="field span-all" style="border:0;padding:0;margin:0"><span>¿Para quién? *</span>
-                <div class="segmented" role="radiogroup" aria-label="Destinatarios">
-                    <label><input type="radio" name="Alcance" value="COLEGIO" data-change="noticia-alcance" ${alcance === 'COLEGIO' ? 'checked' : ''}><span>Todo el colegio</span></label>
-                    <label><input type="radio" name="Alcance" value="CURSOS" data-change="noticia-alcance" ${alcance === 'CURSOS' ? 'checked' : ''}><span>Cursos específicos</span></label>
+            <fieldset class="field span-all" style="border:0;padding:0;margin:0"><span data-para-label>${esCita ? '¿Con los padres de qué alumno(s)? *' : '¿Para quién? *'}</span>
+                <div class="segmented" role="radiogroup" aria-label="Destinatarios" data-solo-evento ${esCita ? 'hidden' : ''}>
+                    <label><input type="radio" name="Alcance" value="COLEGIO" data-change="evento-alcance" ${alcance === 'COLEGIO' ? 'checked' : ''}><span>Todo el colegio</span></label>
+                    <label><input type="radio" name="Alcance" value="CURSOS" data-change="evento-alcance" ${alcance === 'CURSOS' ? 'checked' : ''}><span>Cursos</span></label>
+                    <label><input type="radio" name="Alcance" value="ALUMNOS" data-change="evento-alcance" ${alcance === 'ALUMNOS' ? 'checked' : ''}><span>Alumnos específicos</span></label>
                 </div>
-                <div class="check-list" data-cursos style="margin-top:10px" ${alcance === 'CURSOS' ? '' : 'hidden'}>${cursos.length
+                <div class="check-list" data-cursos style="margin-top:10px" ${!esCita && alcance === 'CURSOS' ? '' : 'hidden'}>${cursos.length
                     ? cursos.map(c => `<label class="check-item"><input type="checkbox" name="CursoIDs" value="${esc(c.CursoID)}" ${sel.has(c.CursoID) ? 'checked' : ''}><span><strong>${esc(c.NombreCurso)}</strong></span></label>`).join('')
                     : '<p class="muted">No tienes cursos asignados.</p>'}</div>
+                <div class="check-list" data-alumnos style="margin-top:10px" ${esCita || alcance === 'ALUMNOS' ? '' : 'hidden'}>${alumnos.length
+                    ? alumnos.map(a => `<label class="check-item"><input type="checkbox" name="EstudianteIDs" value="${esc(a.ID)}" ${selA.has(a.ID) ? 'checked' : ''}>
+                        <span><strong>${esc(a.Nombre)}</strong><small>${esc(a.Grado || '')}${conPadres.has(a.ID) ? '' : ' · sin padres registrados'}</small></span></label>`).join('')
+                    : '<p class="muted">No hay alumnos en tus cursos.</p>'}</div>
+                <small class="field-hint" data-solo-cita ${esCita ? '' : 'hidden'}>La cita la ven solo los padres de los alumnos elegidos (el alumno no). Cada padre confirma si asistirá.</small>
             </fieldset>
         </div>`,
         onSubmit: async (fd) => {
-            const alc = fd.get('Alcance');
+            const tipoSel = fd.get('Tipo') || 'EVENTO';
+            const cita = tipoSel === 'CITA';
+            const alc = cita ? 'ALUMNOS' : fd.get('Alcance');
             const cursoIds = fd.getAll('CursoIDs');
+            const est = fd.getAll('EstudianteIDs');
             if (alc === 'CURSOS' && !cursoIds.length) throw new Error('Selecciona al menos un curso.');
-            const todoDia = fd.get('TodoElDia') === 'on';
+            if (alc === 'ALUMNOS' && !est.length) throw new Error('Selecciona al menos un alumno.');
+            const todoDia = !cita && fd.get('TodoElDia') === 'on';
             await withBusy(() => api('saveEvento', {
-                EventoID: e?.EventoID, Titulo: fd.get('Titulo'), Fecha: fd.get('Fecha'), FechaFin: fd.get('FechaFin'),
+                EventoID: e?.EventoID, Tipo: tipoSel, Titulo: fd.get('Titulo'), Fecha: fd.get('Fecha'), FechaFin: cita ? '' : fd.get('FechaFin'),
                 TodoElDia: todoDia, HoraInicio: todoDia ? '' : fd.get('HoraInicio'), HoraFin: todoDia ? '' : fd.get('HoraFin'),
-                Lugar: fd.get('Lugar'), Descripcion: fd.get('Descripcion'), Color: fd.get('Color'), Alcance: alc, CursoIDs: cursoIds,
+                Lugar: fd.get('Lugar'), Descripcion: fd.get('Descripcion'), Color: cita ? 'morado' : fd.get('Color'),
+                Alcance: alc, CursoIDs: alc === 'CURSOS' ? cursoIds : [], EstudianteIDs: alc === 'ALUMNOS' ? est : [],
+                Modalidad: fd.get('Modalidad'), Contacto: fd.get('Contacto'),
             }));
             agenda().fecha = fd.get('Fecha');
-            toast(e ? 'Evento actualizado.' : 'Evento creado.', 'success');
+            toast(e ? 'Guardado.' : (cita ? 'Cita creada. Los padres la verán en su agenda.' : 'Evento creado.'), 'success');
+            await refresh();
+        },
+    });
+}
+
+// ==========================================================================
+// 9e. MENSAJES: conversaciones privadas, silenciar y bloquear
+// ==========================================================================
+
+const esFamiliaRol = (r) => r === ROLES.PADRE || r === ROLES.ESTUDIANTE;
+const otroDe = (c) => (c.Miembros || []).find(id => id !== state.me.ID);
+const soyMiembro = (c) => (c.Miembros || []).includes(state.me.ID);
+const convSinLeer = (c) => soyMiembro(c) && c.UltimoAutorID !== state.me.ID && (c.Leido?.[state.me.ID] || 0) < (c.UltimoT || 0);
+const convsSinLeer = () => state.db.conversaciones.filter(convSinLeer);
+
+function convTitulo(c) {
+    const nombre = (id) => idx.users.get(id)?.Nombre || c.Nombres?.[id] || 'Usuario';
+    if (soyMiembro(c)) return nombre(otroDe(c));
+    return (c.Miembros || []).map(nombre).join(' ↔ ');
+}
+
+function restriccionVigente(staffId, otroId) {
+    const r = state.db.restricciones.find(x => x.StaffID === staffId && x.OtroID === otroId);
+    if (!r) return null;
+    if (r.Tipo === 'BLOQUEO' || (r.Tipo === 'SILENCIO' && r.Hasta >= today())) return r;
+    return null;
+}
+
+function actualizarInsignia() {
+    const n = convsSinLeer().length;
+    $$('[data-nav-badge]').forEach(b => { b.hidden = !n; b.textContent = n > 9 ? '9+' : String(n); });
+}
+
+/** Con quién puede iniciar una conversación cada rol. */
+function contactosDisponibles() {
+    const me = state.me;
+    const admins = state.db.contactosAdmin.filter(u => u.ID !== me.ID);
+    let lista = [];
+    if (isAdmin()) {
+        lista = state.db.users.filter(u => u.ID !== me.ID);
+    } else if (me.Rol === ROLES.TUTOR) {
+        const alumnos = alumnosElegibles();
+        const ids = new Set(alumnos.map(a => a.ID));
+        const padres = state.db.users.filter(u => u.Rol === ROLES.PADRE && String(u.HijosIDs || '').split(',').some(h => ids.has(h)));
+        lista = [...alumnos, ...padres, ...admins];
+    } else {
+        const hijos = me.Rol === ROLES.PADRE ? hijosDe().map(h => h.ID) : [me.ID];
+        const tutores = new Set(hijos.flatMap(h => cursosDe(h)).map(c => c.TutorID));
+        lista = [...[...tutores].map(id => idx.users.get(id)).filter(Boolean), ...admins];
+    }
+    return [...new Map(lista.map(u => [u.ID, u])).values()].sort(byName);
+}
+
+function etiquetaContacto(u) {
+    if (u.Rol === ROLES.PADRE) {
+        const hijos = String(u.HijosIDs || '').split(',').map(id => idx.users.get(id)?.Nombre).filter(Boolean);
+        return `Padre/Madre${hijos.length ? ' de ' + hijos.join(', ') : ''}`;
+    }
+    if (u.Rol === ROLES.TUTOR) {
+        const cursos = state.db.cursos.filter(c => c.TutorID === u.ID).map(c => c.NombreCurso);
+        return `Maestro${cursos.length ? ' · ' + cursos.join(', ') : ''}`;
+    }
+    if (u.Rol === ROLES.ADMIN) return 'Administración';
+    return `Alumno${u.Grado ? ' · ' + u.Grado : ''}`;
+}
+
+const horaCorta = (s) => {
+    if (!s) return '';
+    return String(s).slice(0, 10) === today() ? String(s).slice(11, 16) : fmtDate(s);
+};
+
+function viewMensajes(convId) {
+    const convs = state.db.conversaciones;
+    const c = convId ? convs.find(x => x.ConvID === convId) : null;
+    const lista = convs.length ? `<ul class="conv-list">${convs.map(x => `<li><a class="conv-item${x.ConvID === convId ? ' is-active' : ''}${convSinLeer(x) ? ' is-unread' : ''}" href="#/mensajes/${encodeURIComponent(x.ConvID)}">
+            ${avatar(idx.users.get(otroDe(x)) || { Nombre: convTitulo(x) }, 'sm')}
+            <span class="conv-main"><strong>${esc(convTitulo(x))}</strong><small>${x.UltimoAutorID === state.me.ID ? 'Tú: ' : ''}${esc(x.UltimoTexto || '')}</small></span>
+            <span class="conv-side"><small>${esc(horaCorta(x.UltimoEn))}</small>${convSinLeer(x) ? '<span class="conv-dot" aria-label="Sin leer"></span>' : ''}</span></a></li>`).join('')}</ul>`
+        : emptyState('Aún no tienes conversaciones.', 'message-square');
+    return `<div class="chat${c ? ' has-thread' : ''}">
+        <section class="card chat-list">
+            <div class="card-head"><h2>Conversaciones</h2><button class="btn btn-primary btn-sm" data-action="nuevo-mensaje">${ico('plus')} Nuevo</button></div>
+            ${lista}
+            <p class="muted chat-aviso">${ico('info', 'icon-xs')} La administración del colegio puede ver las conversaciones.</p>
+        </section>
+        <section class="card chat-thread">${c ? hiloHtml(c) : emptyState(convId ? 'Esta conversación ya no está disponible.' : 'Elige una conversación o empieza una nueva.', 'message-square')}</section>
+    </div>`;
+}
+
+function hiloHtml(c) {
+    const otroId = otroDe(c);
+    const otro = idx.users.get(otroId) || { Nombre: c.Nombres?.[otroId], Rol: c.Roles?.[otroId] };
+    const miembro = soyMiembro(c);
+    let acciones = '', aviso = '';
+    if (miembro && esStaff() && esFamiliaRol(otro.Rol)) {
+        const r = restriccionVigente(state.me.ID, otroId);
+        acciones = `<button class="btn btn-ghost btn-sm" data-action="restringir" data-otro="${esc(otroId)}">${r ? 'Restricción' : 'Silenciar / bloquear'}</button>`;
+        if (r) aviso = `<div class="chat-banner">${r.Tipo === 'BLOQUEO' ? 'Bloqueaste los mensajes de esta persona.' : `Silenciaste a esta persona hasta el ${fmtDate(r.Hasta)}.`}${r.Motivo ? ` Motivo: <em>${esc(r.Motivo)}</em>` : ''}</div>`;
+    }
+    let puedeEscribir = miembro;
+    if (miembro && esFamiliaRol(state.me.Rol)) {
+        const r = restriccionVigente(otroId, state.me.ID);
+        if (r) {
+            puedeEscribir = false;
+            aviso = `<div class="chat-banner">${r.Tipo === 'BLOQUEO' ? `${esc(otro.Nombre)} no está recibiendo tus mensajes por ahora.` : `${esc(otro.Nombre)} pausó los mensajes contigo hasta el ${fmtDate(r.Hasta)}.`} Si es urgente, comunícate con la administración.</div>`;
+        }
+    }
+    if (!miembro) aviso = `<div class="chat-banner">Solo lectura: ${esPadre() ? 'conversación de tu hijo/a con su maestro.' : 'supervisión de la administración.'}</div>`;
+    if (isAdmin() && !miembro) {
+        const rs = state.db.restricciones.filter(r => (c.Miembros || []).includes(r.StaffID) && (c.Miembros || []).includes(r.OtroID));
+        rs.forEach(r => { aviso += `<div class="chat-banner">${esc(r.StaffNombre)} ${r.Tipo === 'BLOQUEO' ? 'bloqueó' : `silenció hasta ${fmtDate(r.Hasta)}`} a ${esc(r.OtroNombre)}. Motivo: <em>${esc(r.Motivo || '')}</em></div>`; });
+    }
+    return `<div class="chat-head">
+            <a class="icon-btn chat-back" href="#/mensajes" aria-label="Volver a conversaciones">${ico('arrow-left')}</a>
+            ${person(otro.Nombre ? otro : { Nombre: convTitulo(c) }, miembro ? etiquetaContacto(otro) : convTitulo(c))}
+            <div class="row">${acciones}</div>
+        </div>
+        ${aviso}
+        <div class="chat-body" data-chat-body data-conv="${esc(c.ConvID)}">${mensajesHtml(c.ConvID)}</div>
+        ${puedeEscribir ? `<form class="chat-compose" data-submit="mensaje" data-conv="${esc(c.ConvID)}">
+            <textarea name="Texto" rows="2" maxlength="2000" required placeholder="Escribe tu mensaje…" aria-label="Mensaje"></textarea>
+            <button type="submit" class="btn btn-primary">Enviar</button>
+        </form>` : ''}`;
+}
+
+function mensajesHtml(convId) {
+    const lista = state.chat?.[convId];
+    if (!lista) return `<p class="muted center" style="padding:24px">${ico('loader', 'spin')} Cargando mensajes…</p>`;
+    if (!lista.length) return emptyState('Sin mensajes todavía.', 'message-square');
+    let dia = '';
+    return lista.map(m => {
+        const d = String(m.Fecha).slice(0, 10);
+        const sep = d !== dia ? `<div class="chat-day"><span>${esc(fmtDate(d))}</span></div>` : '';
+        dia = d;
+        const mio = m.AutorID === state.me.ID;
+        return `${sep}<div class="msg${mio ? ' is-mine' : ''}">
+            ${mio ? '' : `<small class="msg-autor">${esc(m.AutorNombre)}</small>`}
+            <div class="msg-bubble">${esc(m.Texto)}</div>
+            <small class="msg-time">${esc(String(m.Fecha).slice(11, 16))}</small></div>`;
+    }).join('');
+}
+
+async function mensajesAfter(convId) {
+    actualizarInsignia();
+    if (!convId) return;
+    const c = state.db.conversaciones.find(x => x.ConvID === convId);
+    if (!c) return;
+    const pintar = () => {
+        const body = $(`[data-chat-body][data-conv="${CSS.escape(convId)}"]`);
+        if (!body) return;
+        body.innerHTML = mensajesHtml(convId);
+        body.scrollTop = body.scrollHeight;
+    };
+    pintar();
+    try {
+        const r = await api('getMensajes', { ConvID: convId });
+        state.chat = { ...(state.chat || {}), [convId]: r.mensajes };
+        pintar();
+        if (convSinLeer(c)) {
+            await api('marcarLeida', { ConvID: convId });
+            c.Leido = { ...(c.Leido || {}), [state.me.ID]: Date.now() };
+            $$('.conv-item.is-active').forEach(a => { a.classList.remove('is-unread'); a.querySelector('.conv-dot')?.remove(); });
+            actualizarInsignia();
+        }
+    } catch (e) {
+        toast(e.message, 'error');
+    }
+}
+
+async function enviarEnConversacion(form) {
+    const convId = form.dataset.conv;
+    const texto = form.Texto.value.trim();
+    if (!texto) return;
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    try {
+        const r = await withBusy(() => api('enviarMensaje', { ConvID: convId, Texto: texto }));
+        state.chat = { ...(state.chat || {}), [convId]: [...(state.chat?.[convId] || []), r] };
+        form.Texto.value = '';
+        await refresh();
+    } catch (e) {
+        toast(e.message, 'error');
+    } finally {
+        btn.disabled = false;
+    }
+}
+
+async function nuevoMensaje(paraId = '') {
+    const contactos = contactosDisponibles();
+    if (!contactos.length) return toast('Aún no tienes contactos disponibles para escribir.', 'info');
+    const r = await openModal({
+        title: 'Nuevo mensaje',
+        wide: true,
+        submitLabel: 'Enviar',
+        body: `<label class="field"><span>Para *</span><select name="ParaID" required>
+                <option value="">Elige a quién escribir…</option>
+                ${contactos.map(u => `<option value="${esc(u.ID)}" ${u.ID === paraId ? 'selected' : ''}>${esc(u.Nombre)} — ${esc(etiquetaContacto(u))}</option>`).join('')}
+            </select></label>
+            <label class="field"><span>Mensaje *</span><textarea name="Texto" rows="5" maxlength="2000" required></textarea></label>
+            <p class="muted" style="font-size:13px">La administración del colegio puede ver las conversaciones.</p>`,
+        onSubmit: async (fd) => withBusy(() => api('enviarMensaje', { ParaID: fd.get('ParaID'), Texto: fd.get('Texto') })),
+    });
+    if (r && r.ConvID) {
+        await refresh();
+        go(`mensajes/${encodeURIComponent(r.ConvID)}`);
+    }
+}
+
+async function restringir(otroId) {
+    const otro = idx.users.get(otroId);
+    const r = restriccionVigente(state.me.ID, otroId);
+    const manana = isoDe(new Date(Date.now() + 7 * 86400000));
+    await openModal({
+        title: `Mensajes de ${otro?.Nombre || 'esta persona'}`,
+        submitLabel: 'Guardar',
+        body: `${r ? `<p>Estado actual: <strong>${r.Tipo === 'BLOQUEO' ? 'Bloqueado' : `Silenciado hasta el ${fmtDate(r.Hasta)}`}</strong></p>` : ''}
+            <div class="segmented" role="radiogroup" aria-label="Acción">
+                <label><input type="radio" name="Tipo" value="SILENCIO" data-change="restriccion-tipo" ${!r || r.Tipo === 'SILENCIO' ? 'checked' : ''}><span>Silenciar hasta una fecha</span></label>
+                <label><input type="radio" name="Tipo" value="BLOQUEO" data-change="restriccion-tipo" ${r?.Tipo === 'BLOQUEO' ? 'checked' : ''}><span>Bloquear</span></label>
+                ${r ? '<label><input type="radio" name="Tipo" value="NINGUNA" data-change="restriccion-tipo"><span>Quitar restricción</span></label>' : ''}
+            </div>
+            <label class="field" data-hasta style="margin-top:12px" ${r?.Tipo === 'BLOQUEO' ? 'hidden' : ''}><span>Silenciado hasta *</span><input type="date" name="Hasta" min="${today()}" value="${esc(r?.Hasta || manana)}"></label>
+            <p class="muted" style="font-size:13px">Mientras dure, ${esc(otro?.Nombre || 'esta persona')} no podrá enviarte mensajes; tú sí puedes escribirle. Queda registrado en la bitácora y la administración lo ve.</p>
+            ${justificationField('Explica el motivo. Lo verá la administración (no se le muestra a la otra persona).')}`,
+        onSubmit: async (fd) => {
+            await withBusy(() => api('setRestriccion', { OtroID: otroId, Tipo: fd.get('Tipo'), Hasta: fd.get('Hasta'), justificacion: fd.get('justificacion') }));
+            toast('Listo.', 'success');
+            await refresh();
+        },
+    });
+}
+
+// ==========================================================================
+// 9f. MATERIAL DE APOYO y adjuntos de evaluaciones
+// ==========================================================================
+
+const tamano = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+const dominio = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+
+function materialLink(m, chip = false) {
+    if (m.Tipo === 'ENLACE') {
+        const url = safeUrl(m.URL);
+        return url ? `<a class="${chip ? 'mat-chip' : 'btn btn-ghost btn-sm'}" href="${esc(url)}" target="_blank" rel="noopener noreferrer" title="${esc(m.Descripcion || url)}">${ico('arrow-up-right', 'icon-sm')} ${esc(chip ? m.Titulo : 'Abrir')}</a>` : '';
+    }
+    return `<button type="button" class="${chip ? 'mat-chip' : 'btn btn-ghost btn-sm'}" data-action="download-material" data-id="${esc(m.MaterialID)}" title="${esc(m.ArchivoNombre)}">${ico('download', 'icon-sm')} ${esc(chip ? m.Titulo : 'Descargar')}</button>`;
+}
+
+/** Adjuntos de una evaluación como chips (con botón de quitar para quien gestiona). */
+function adjuntosHtml(item, gestiona) {
+    const adj = idx.adjuntosByItem.get(item.ItemID) || [];
+    if (!adj.length) return '';
+    return `<div class="mat-chips">${adj.map(m => `<span class="mat-chip-wrap">${materialLink(m, true)}${gestiona
+        ? `<button type="button" class="icon-btn danger icon-btn-xs" data-action="delete-material" data-id="${esc(m.MaterialID)}" aria-label="Quitar adjunto ${esc(m.Titulo)}" title="Quitar">${ico('x', 'icon-xs')}</button>` : ''}</span>`).join('')}</div>`;
+}
+
+/** Lista de material de un curso. unidad: número, 0 = general, null = todo. */
+function materialLista(cursoId, unidad, gestiona, compacto = false) {
+    const lista = (idx.materialesByCurso.get(cursoId) || []).filter(m => unidad == null || +m.Unidad === +unidad);
+    if (!lista.length) return '';
+    const titulo = compacto ? `<h4 class="mat-title">${ico('folder-open', 'icon-sm')} ${unidad === 0 ? 'Material general del curso' : 'Material de apoyo'}</h4>` : '';
+    return `${titulo}<ul class="item-list mat-list">${lista.map(m => `<li class="item-row">
+        <span class="mat-icon">${ico(m.Tipo === 'ENLACE' ? 'arrow-up-right' : 'paperclip')}</span>
+        <div class="item-main"><strong>${esc(m.Titulo)}</strong>
+            <div class="item-meta">${m.Descripcion ? `<span>${esc(m.Descripcion)}</span>` : ''}<span>${m.Tipo === 'ENLACE' ? esc(dominio(m.URL)) : `${esc(m.ArchivoNombre)} · ${tamano(m.Tamano || 0)}`}</span>${!compacto ? `<span>${esc(m.AutorNombre)} · ${fmtDate(m.Fecha)}</span>` : ''}</div></div>
+        <div class="item-side">${materialLink(m)}${gestiona ? `<button class="icon-btn danger" data-action="delete-material" data-id="${esc(m.MaterialID)}" aria-label="Eliminar material" title="Eliminar">${ico('trash')}</button>` : ''}</div>
+    </li>`).join('')}</ul>`;
+}
+
+function cursoMaterial(c, m) {
+    const units = Grades.units(c.CursoID);
+    const grupos = [[0, 'General del curso'], ...units.map(u => [u.numero, `U${u.numero} · ${u.nombre}`])];
+    const hay = (idx.materialesByCurso.get(c.CursoID) || []).length;
+    return `<section class="card">
+        <div class="card-head"><h2>Material de apoyo</h2>
+            ${m ? `<button class="btn btn-primary btn-sm" data-action="new-material" data-curso="${esc(c.CursoID)}">${ico('plus')} Material</button>` : ''}</div>
+        ${hay ? grupos.map(([n, nombre]) => {
+            const html = materialLista(c.CursoID, n, m);
+            return html ? `<div class="unit-block"><div class="unit-head"><h3>${esc(nombre)}</h3></div>${html}</div>` : '';
+        }).join('') : emptyState('Sube guías, presentaciones, lecturas o enlaces a videos para que los alumnos estudien.', 'folder-open')}
+        <p class="muted" style="font-size:13px;padding:0 22px 16px">Las hojas de trabajo o enunciados de una tarea se adjuntan desde la pestaña Evaluaciones (botón "Adjuntar").</p>
+    </section>`;
+}
+
+async function openMaterialModal(cursoId, itemId = '') {
+    const item = itemId ? idx.items.get(itemId) : null;
+    const units = Grades.units(cursoId);
+    await openModal({
+        title: item ? `Adjuntar a "${item.Titulo}"` : 'Nuevo material de apoyo',
+        wide: true,
+        submitLabel: 'Guardar',
+        body: `<div class="form-grid">
+            <fieldset class="field span-all" style="border:0;padding:0;margin:0"><span>Tipo *</span>
+                <div class="segmented" role="radiogroup" aria-label="Tipo de material">
+                    <label><input type="radio" name="Tipo" value="ARCHIVO" data-change="material-tipo" checked><span>Archivo</span></label>
+                    <label><input type="radio" name="Tipo" value="ENLACE" data-change="material-tipo"><span>Enlace</span></label>
+                </div></fieldset>
+            <label class="field span-all"><span>Título *</span><input name="Titulo" required maxlength="160" placeholder="${item ? 'Ej.: Hoja de trabajo' : 'Ej.: Guía de estudio de la unidad 1'}"></label>
+            ${item ? '' : `<label class="field"><span>Unidad</span><select name="Unidad">${options([[0, 'General del curso'], ...units.map(u => [u.numero, `U${u.numero} · ${u.nombre}`])], 0)}</select></label>`}
+            <label class="field span-all" data-mat-archivo><span>Archivo * <small class="muted">(máx. ${CONFIG.MAX_ENTREGA_MB} MB)</small></span>
+                <input type="file" name="archivo" accept="${CONFIG.EXTENSIONES.map(e => '.' + e).join(',')}"></label>
+            <label class="field span-all" data-mat-enlace hidden><span>Enlace *</span><input type="url" name="URL" maxlength="2000" placeholder="https://…"></label>
+            <label class="field span-all"><span>Descripción</span><textarea name="Descripcion" rows="2" maxlength="1000"></textarea></label>
+        </div>`,
+        onSubmit: async (fd) => {
+            const tipo = fd.get('Tipo');
+            const payload = { CursoID: cursoId, ItemID: itemId, Unidad: fd.get('Unidad') ?? 0, Tipo: tipo, Titulo: fd.get('Titulo'), Descripcion: fd.get('Descripcion') };
+            if (tipo === 'ENLACE') {
+                payload.URL = fd.get('URL');
+                if (!payload.URL) throw new Error('Escribe el enlace.');
+            } else {
+                const file = fd.get('archivo');
+                if (!file || !file.size) throw new Error('Elige un archivo.');
+                const ext = (file.name.split('.').pop() || '').toLowerCase();
+                if (!CONFIG.EXTENSIONES.includes(ext)) throw new Error(`Tipo de archivo no permitido. Usa: ${CONFIG.EXTENSIONES.join(', ')}.`);
+                if (file.size > CONFIG.MAX_ENTREGA_MB * 1024 * 1024) throw new Error(`El archivo supera ${CONFIG.MAX_ENTREGA_MB} MB.`);
+                payload.nombre = file.name;
+                payload.base64 = await fileToBase64(file);
+            }
+            await withBusy(() => api('saveMaterial', payload));
+            toast(item ? 'Adjunto agregado.' : 'Material publicado.', 'success');
             await refresh();
         },
     });
@@ -2677,12 +3106,12 @@ async function uploadEntrega(btn) {
 }
 
 /** Descarga una entrega. Se fuerza como archivo adjunto (nunca se abre dentro de la app). */
-async function downloadEntrega(btn) {
+async function downloadEntrega(btn, accion = 'getEntregaFile', payload = { EntregaID: btn.dataset.id }) {
     const label = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = btn.classList.contains('file-dot') ? ico('loader', 'spin') : `${ico('loader', 'spin')} Descargando…`;
     try {
-        const f = await withBusy(() => api('getEntregaFile', { EntregaID: btn.dataset.id }));
+        const f = await withBusy(() => api(accion, payload));
         const bin = atob(f.base64);
         const bytes = new Uint8Array(bin.length);
         for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
@@ -2912,6 +3341,37 @@ const ACTIONS = {
         } catch (e) { toast(e.message, 'error'); el.disabled = false; }
     },
     'ver-entregas': (el) => verEntregas(el.dataset.id),
+    'nuevo-mensaje': (el) => nuevoMensaje(el.dataset.para || ''),
+    'restringir': (el) => restringir(el.dataset.otro),
+    'responder-cita': async (el) => {
+        const e = state.db.eventos.find(x => x.EventoID === el.dataset.id);
+        if (el.dataset.r === 'ASISTIRE') {
+            await withBusy(() => api('responderCita', { EventoID: el.dataset.id, respuesta: 'ASISTIRE' }));
+            $('#modal').close();
+            toast('Confirmaste tu asistencia.', 'success');
+            return refresh();
+        }
+        await openModal({
+            title: `No puedo asistir · ${e?.Titulo || 'cita'}`, submitLabel: 'Enviar respuesta',
+            body: `<label class="field"><span>Comentario para el maestro *</span><textarea name="comentario" required maxlength="500" rows="3" placeholder="Ej.: ¿Podría ser el viernes a la misma hora?"></textarea></label>`,
+            onSubmit: async (fd) => {
+                await withBusy(() => api('responderCita', { EventoID: el.dataset.id, respuesta: 'NO_PUEDO', comentario: fd.get('comentario') }));
+                toast('Respuesta enviada al maestro.', 'success');
+                await refresh();
+            },
+        });
+    },
+    'new-material': (el) => openMaterialModal(el.dataset.curso, el.dataset.item || ''),
+    'download-material': (el) => downloadEntrega(el, 'getMaterialFile', { MaterialID: el.dataset.id }),
+    'delete-material': async (el) => {
+        const m = state.db.materiales.find(x => x.MaterialID === el.dataset.id);
+        await openModal({
+            title: `Eliminar "${m?.Titulo || 'material'}"`, danger: true, submitLabel: 'Eliminar',
+            body: '<p>Dejará de estar disponible para alumnos y padres. Queda registro en la bitácora.</p>',
+            onSubmit: async () => { await withBusy(() => api('deleteMaterial', { MaterialID: el.dataset.id })); toast('Material eliminado.', 'success'); await refresh(); },
+        });
+    },
+
     'agenda-nav': (el) => { agendaNav(Number(el.dataset.dir)); render(); },
     'agenda-ir': (el) => { Object.assign(agenda(), { modo: 'dia', fecha: el.dataset.fecha }); render(); },
     'new-evento': (el) => openEventoModal(null, { fecha: el.dataset.fecha || '', hora: el.dataset.hora || '' }),
@@ -3041,6 +3501,35 @@ const CHANGES = {
     },
     'agenda-modo': (el) => { agenda().modo = el.value; render(); },
     'agenda-entregas': (el) => { agenda().entregas = el.checked; render(); },
+    'evento-tipo': (el) => {
+        const f = el.form, cita = el.value === 'CITA';
+        f.querySelectorAll('[data-solo-evento]').forEach(x => { x.hidden = cita; });
+        f.querySelectorAll('[data-solo-cita]').forEach(x => { x.hidden = !cita; });
+        f.querySelector('[data-para-label]').textContent = cita ? '¿Con los padres de qué alumno(s)? *' : '¿Para quién? *';
+        const alc = f.querySelector('input[name=Alcance]:checked')?.value;
+        f.querySelector('[data-cursos]').hidden = cita || alc !== 'CURSOS';
+        f.querySelector('[data-alumnos]').hidden = !cita && alc !== 'ALUMNOS';
+        if (cita) {
+            f.TodoElDia.checked = false;
+            f.querySelectorAll('[data-horas]').forEach(x => { x.hidden = false; });
+        }
+        const llamada = cita && f.querySelector('input[name=Modalidad]:checked')?.value === 'LLAMADA';
+        f.querySelector('[data-lugar]').hidden = llamada;
+        f.querySelector('[data-contacto]').hidden = !llamada;
+    },
+    'evento-alcance': (el) => {
+        el.form.querySelector('[data-cursos]').hidden = el.value !== 'CURSOS';
+        el.form.querySelector('[data-alumnos]').hidden = el.value !== 'ALUMNOS';
+    },
+    'evento-modalidad': (el) => {
+        el.form.querySelector('[data-lugar]').hidden = el.value === 'LLAMADA';
+        el.form.querySelector('[data-contacto]').hidden = el.value !== 'LLAMADA';
+    },
+    'restriccion-tipo': (el) => { el.form.querySelector('[data-hasta]').hidden = el.value !== 'SILENCIO'; },
+    'material-tipo': (el) => {
+        el.form.querySelector('[data-mat-archivo]').hidden = el.value !== 'ARCHIVO';
+        el.form.querySelector('[data-mat-enlace]').hidden = el.value !== 'ENLACE';
+    },
     'evento-todo': (el) => { el.form.querySelectorAll('[data-horas]').forEach(x => { x.hidden = el.checked; }); },
     'noticia-alcance': (el) => {
         const box = el.form.querySelector('[data-cursos]');
@@ -3091,6 +3580,7 @@ const SUBMITS = {
         else { btn.classList.remove('is-loading'); btn.disabled = false; }
     },
     enrollment: (form) => saveEnrollment(form),
+    mensaje: (form) => enviarEnConversacion(form),
     'change-password': async (form) => {
         const err = form.querySelector('.form-error');
         const fail = (msg) => { err.textContent = msg; err.hidden = false; };

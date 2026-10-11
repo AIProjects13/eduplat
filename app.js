@@ -16,6 +16,9 @@ import {
 import {
     getFunctions, httpsCallable, connectFunctionsEmulator,
 } from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js';
+import {
+    getFirestore, doc, onSnapshot, connectFirestoreEmulator,
+} from 'https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js';
 import { ico, hydrateIcons } from './icons.js';
 import { puntualidad, notaEfectiva, notaAprobacion, estadoFinal, reglaTexto } from './notas.js';
 
@@ -64,6 +67,8 @@ const firebaseApp = initializeApp(CONFIG.firebase);
 // Sesión por pestaña: al cerrar el navegador se cierra la sesión (equipos compartidos).
 const auth = initializeAuth(firebaseApp, { persistence: browserSessionPersistence });
 const functions = getFunctions(firebaseApp, CONFIG.FUNCTIONS_REGION);
+// Solo para escuchar la señal de cambios propia (las reglas no dejan leer nada más).
+const firestore = getFirestore(firebaseApp);
 
 // Modo pruebas: en tu PC, abre http://localhost:5600/?emulador=1 para usar los emuladores locales.
 const USA_EMULADOR = ['localhost', '127.0.0.1'].includes(location.hostname)
@@ -71,6 +76,7 @@ const USA_EMULADOR = ['localhost', '127.0.0.1'].includes(location.hostname)
 if (USA_EMULADOR) {
     connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
     connectFunctionsEmulator(functions, '127.0.0.1', 5001);
+    connectFirestoreEmulator(firestore, '127.0.0.1', 8080);
     console.info('[Plataforma] Modo emulador: los datos son de prueba y viven solo en tu PC.');
 }
 const callApi = httpsCallable(functions, 'api', { timeout: 120000 });
@@ -331,6 +337,7 @@ async function api(action, payload = {}, { forceRefresh = false, retried = false
     // El token viaja automáticamente con la llamada; se renueva cuando se pide (p. ej. tras cambiar la contraseña).
     if (forceRefresh) await auth.currentUser.getIdToken(true);
 
+    if (!READ_ACTIONS.has(action)) state.ultimaEscritura = Date.now();
     let json;
     try {
         json = (await callApi({ action, payload })).data;
@@ -384,6 +391,66 @@ async function refresh() {
     renderChrome();
     render();
 }
+
+// --------------------------------------------------------------------------
+// Tiempo real: cuando a esta persona le cambia algo (lo hizo otro usuario), el
+// servidor toca su señal; aquí se escucha y se recargan los datos solos.
+// No recarga encima de trabajo sin guardar, de un formulario abierto ni de un
+// campo en edición: espera a que termine.
+// --------------------------------------------------------------------------
+
+const senal = { unsub: null, pendiente: false, timer: null };
+
+function escucharCambios() {
+    dejarDeEscuchar();
+    if (!auth.currentUser) return;
+    let primera = true;
+    senal.unsub = onSnapshot(doc(firestore, 'senales', auth.currentUser.uid), (snap) => {
+        if (primera) { primera = false; return; }          // estado inicial: los datos ya están cargados
+        const d = snap.data();
+        if (!d) return;
+        // Cambio hecho desde esta misma pestaña: ya se recargó al guardar.
+        if (d.Propio && Date.now() - (state.ultimaEscritura || 0) < 15000) return;
+        senal.pendiente = true;
+        programarRecarga(600);
+    }, (e) => console.warn('[Plataforma] Sin actualización en tiempo real:', e.code || e));
+}
+
+function dejarDeEscuchar() {
+    senal.unsub?.();
+    senal.unsub = null;
+    senal.pendiente = false;
+    clearTimeout(senal.timer);
+}
+
+function programarRecarga(ms) {
+    clearTimeout(senal.timer);
+    senal.timer = setTimeout(recargarSiSePuede, ms);
+}
+
+function ocupado() {
+    const activo = document.activeElement;
+    const editando = activo && $('#view').contains(activo) && activo.matches('input, textarea, select, [contenteditable]');
+    return hasUnsavedWork() || $('#modal').open || state.busy > 0 || editando || document.hidden;
+}
+
+async function recargarSiSePuede() {
+    if (!senal.pendiente || !state.me || $('#screen-app').hidden) return;
+    if (ocupado()) return programarRecarga(2500);
+    senal.pendiente = false;
+    const y = window.scrollY;
+    try {
+        await withBusy(loadSnapshot);
+        if (ocupado()) { senal.pendiente = true; return programarRecarga(2500); }   // empezó a escribir mientras cargaba
+        renderChrome();
+        render();
+        window.scrollTo(0, y);
+    } catch (e) {
+        if (!(e instanceof ApiError)) console.error('[Plataforma] Error al actualizar:', e);
+    }
+}
+
+document.addEventListener('visibilitychange', () => { if (!document.hidden && senal.pendiente) programarRecarga(300); });
 
 /** Guarda con el servidor y recarga los datos. Devuelve true si todo salió bien. */
 async function mutate(action, payload, successMsg) {
@@ -3177,6 +3244,7 @@ async function bootSession(forceRefresh = false) {
         showScreen('app');
         if (!location.hash || !VIEWS[parseHash().view]) history.replaceState(null, '', `#/${HOME[state.me.Rol]}`);
         render();
+        escucharCambios();
     } catch (e) {
         if (e.code === 'NOT_REGISTERED') {
             showDenied('Cuenta sin acceso', `${auth.currentUser?.email || ''} no está registrado en la Plataforma Educativa. Solicita tu acceso a la administración.`);
@@ -3208,6 +3276,7 @@ onAuthStateChanged(auth, (user) => {
     state.user = user;
     lastActivity = Date.now();
     if (!user) {
+        dejarDeEscuchar();
         state.me = null;
         state.db = emptyDb();
         discardDrafts();

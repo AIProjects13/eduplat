@@ -811,6 +811,10 @@ function viewUsuarios() {
             `<button class="tab" role="tab" aria-selected="${f.rol === v}" data-action="users-rol" data-rol="${v}">${l}</button>`).join('')}</div>
         <div class="row">
             <input type="search" class="inline-select" placeholder="Buscar por nombre, correo o grado…" value="${esc(f.q)}" data-input="users-q" aria-label="Buscar usuarios">
+            ${(() => {
+                const grados = [...new Set(state.db.users.filter(u => u.Rol === ROLES.ESTUDIANTE).map(u => u.Grado).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es', { numeric: true }));
+                return grados.length > 1 ? `<select class="inline-select" data-change="users-grado" aria-label="Filtrar por grado"><option value="">Todos los grados</option>${grados.map(g => `<option ${f.grado === g ? 'selected' : ''}>${esc(g)}</option>`).join('')}</select>` : '';
+            })()}
             ${admin ? '<button class="btn btn-primary" data-action="new-user">+ Nuevo usuario</button>' : ''}
         </div>
     </div>
@@ -818,15 +822,21 @@ function viewUsuarios() {
 }
 
 function usersTable() {
-    const { rol, q } = state.usersFilter;
+    const { rol, q, grado = '' } = state.usersFilter;
     const admin = isAdmin();
-    const query = q.trim().toLowerCase();
+    const palabras = norm(q).split(/\s+/).filter(Boolean);
     const matchRol = (u) => rol === 'ALL' || u.Rol === rol || (rol === 'TUTOR' && u.Rol === ROLES.ADMIN);
-    const list = state.db.users
+    const gradoDeU = (u) => (u.Rol === ROLES.PADRE
+        ? String(u.HijosIDs || '').split(',').map(id => idx.users.get(id)?.Grado).filter(Boolean)
+        : [u.Grado]);
+    const todos = state.db.users
         .filter(u => u.ID !== state.me.ID && matchRol(u) &&
-            (!query || `${u.Nombre} ${u.Email} ${u.Grado}`.toLowerCase().includes(query)))
+            (!grado || gradoDeU(u).includes(grado)) &&
+            palabras.every(w => norm(`${u.Nombre} ${u.Email} ${u.Grado}`).includes(w)))
         .sort(byName);
-    if (!list.length) return emptyState('No hay usuarios que coincidan.', 'search');
+    if (!todos.length) return emptyState('No hay usuarios que coincidan. Prueba con otro nombre o grado.', 'search');
+    const limite = state.usersFilter.limite || 50;
+    const list = todos.slice(0, limite);
 
     const rows = list.map(u => {
         let rel = '—';
@@ -850,6 +860,7 @@ function usersTable() {
             ${admin ? `<td>${u.Vinculado ? '<span class="badge badge-success">Activa</span>' : '<span class="badge badge-warn" title="Se vinculará cuando inicie sesión por primera vez">Pendiente</span>'}${u.DebeCambiarClave === 'SI' ? ' <span class="badge" title="Aún no cambia su contraseña temporal">Clave temporal</span>' : ''}</td>` : ''}
             <td class="actions">
                 ${u.Rol === ROLES.ESTUDIANTE ? `<a class="btn btn-ghost btn-sm" href="#/estudiante/${encodeURIComponent(u.ID)}">Ver progreso</a>` : ''}
+                ${puedoEscribirA(u) ? `<button class="icon-btn" data-action="nuevo-mensaje" data-para="${esc(u.ID)}" title="Enviar mensaje" aria-label="Enviar mensaje a ${esc(u.Nombre)}">${ico('message-square')}</button>` : ''}
                 ${editable ? `<button class="icon-btn" data-action="edit-user" data-id="${esc(u.ID)}" aria-label="Editar ${esc(u.Nombre)}" title="Editar">${ico('pencil')}</button>
                 <button class="icon-btn danger" data-action="delete-user" data-id="${esc(u.ID)}" aria-label="Eliminar ${esc(u.Nombre)}" title="Eliminar">${ico('trash')}</button>` : ''}
             </td></tr>`;
@@ -857,7 +868,9 @@ function usersTable() {
 
     return `<div class="table-wrap"><table class="table">
         <thead><tr><th>Usuario</th><th>Rol</th><th>Grado</th><th>${admin ? 'Vínculo / cursos' : 'Vínculo'}</th>${admin ? '<th>Cuenta</th>' : ''}<th></th></tr></thead>
-        <tbody>${rows}</tbody></table></div>`;
+        <tbody>${rows}</tbody></table></div>
+        <div class="picker-foot" style="padding:12px 18px"><small>${list.length < todos.length ? `Mostrando ${list.length} de ${todos.length}` : `${todos.length} usuario(s)`}</small>
+            ${list.length < todos.length ? '<button class="btn btn-ghost btn-sm" data-action="users-mas">Mostrar más</button>' : ''}</div>`;
 }
 
 function justificationField(help = 'Explica el motivo del cambio. Queda registrado en la auditoría y es visible para los padres.') {
@@ -893,10 +906,8 @@ function userForm(u = null) {
             <input name="Grado" maxlength="80" value="${esc(u?.Grado)}" placeholder="Ej.: 3ro Básico"></label>
         <fieldset class="field span-all" data-role-only="PADRE" ${rol === ROLES.PADRE ? '' : 'hidden'} style="border:0;padding:0;margin:0">
             <span>Hijos vinculados (lectura de su progreso)</span>
-            ${est.length ? `<div class="check-list">${est.map(s => `
-                <label class="check-item"><input type="checkbox" name="HijosIDs" value="${esc(s.ID)}" ${hijos.has(s.ID) ? 'checked' : ''}>
-                <span><strong>${esc(s.Nombre)}</strong><small>${esc(s.Grado || s.Email)}</small></span></label>`).join('')}</div>`
-            : '<p class="muted">Primero crea las cuentas de los estudiantes.</p>'}
+            ${picker({ name: 'HijosIDs', items: est.map(s => ({ id: s.ID, nombre: s.Nombre, sub: s.Grado || s.Email, grado: s.Grado || '', user: s })),
+                selected: [...hijos], placeholder: 'Buscar al hijo/a por nombre…', vacio: 'Primero crea las cuentas de los estudiantes.' })}
         </fieldset>
     </div>
     ${isEdit ? justificationField() : ''}`;
@@ -1255,10 +1266,10 @@ function cursoEstudiantes(c) {
         <div class="card-head"><h2>Estudiantes inscritos</h2>
             <div class="row"><span class="badge badge-brand" data-cupo>${cupoTexto(inscritos.size)} cupos usados</span>
             <button type="submit" class="btn btn-primary btn-sm" ${est.length ? '' : 'disabled'}>Guardar inscripciones</button></div></div>
-        <div class="card-body">${est.length ? `<div class="check-list">${est.map(s => `
-            <label class="check-item"><input type="checkbox" name="est" value="${esc(s.ID)}" data-change="enroll-check" ${inscritos.has(s.ID) ? 'checked' : ''}
-                ${!inscritos.has(s.ID) && inscritos.size >= CONFIG.MAX_ALUMNOS_CURSO ? 'disabled' : ''}>
-            ${avatar(s, 'sm')}<span><strong>${esc(s.Nombre)}</strong><small>${esc(s.Grado || s.Email)}</small></span></label>`).join('')}</div>`
+        <div class="card-body">${est.length ? `<p class="muted" style="font-size:13px;margin-top:0">Los inscritos aparecen primero. Filtra por grado o escribe un nombre para encontrar a otros alumnos.</p>
+            ${picker({ name: 'est', items: est.map(s => ({ id: s.ID, nombre: s.Nombre, sub: s.Grado || s.Email, grado: s.Grado || '', user: s })),
+                selected: [...inscritos], placeholder: 'Buscar alumno por nombre…',
+                inputAttrs: (it) => `data-change="enroll-check" ${!inscritos.has(it.id) && inscritos.size >= CONFIG.MAX_ALUMNOS_CURSO ? 'disabled' : ''}` })}`
             : emptyState('Crea cuentas de estudiantes en "Usuarios" para inscribirlos.', 'graduation-cap', '<a class="btn btn-ghost" href="#/usuarios">Ir a usuarios</a>')}
         </div></form>`;
 }
@@ -1602,7 +1613,13 @@ function auditCheckHtml(r) {
 function viewTutorStudent(estId) {
     const u = idx.users.get(estId);
     if (!u || u.Rol !== ROLES.ESTUDIANTE) return `<section class="card">${emptyState('Estudiante no encontrado.', 'search', '<a class="btn btn-ghost" href="#/usuarios">Volver</a>')}</section>`;
-    return `<div><a class="btn btn-link" href="#/usuarios">${ico('arrow-left')} Usuarios</a></div>${progressView(estId, { showAudit: true })}`;
+    const padres = state.db.users.filter(p => p.Rol === ROLES.PADRE && String(p.HijosIDs || '').split(',').includes(estId));
+    const botones = [
+        puedoEscribirA(u) ? `<button class="btn btn-primary btn-sm" data-action="nuevo-mensaje" data-para="${esc(u.ID)}">${ico('message-square')} Mensaje al alumno</button>` : '',
+        ...padres.filter(puedoEscribirA).map(p => `<button class="btn btn-ghost btn-sm" data-action="nuevo-mensaje" data-para="${esc(p.ID)}">${ico('message-square')} Mensaje a ${esc(p.Nombre)}</button>`),
+        esStaff() && padres.length ? `<button class="btn btn-ghost btn-sm" data-action="cita-alumno" data-est="${esc(estId)}">${ico('calendar')} Citar a los padres</button>` : '',
+    ].join('');
+    return `<div class="row-between"><a class="btn btn-link" href="#/usuarios">${ico('arrow-left')} Usuarios</a><div class="row">${botones}</div></div>${progressView(estId, { showAudit: true })}`;
 }
 
 // ==========================================================================
@@ -2044,9 +2061,8 @@ async function openNoticiaModal(n = null) {
                     <label><input type="radio" name="Alcance" value="COLEGIO" data-change="noticia-alcance" ${alcance === 'COLEGIO' ? 'checked' : ''}><span>Todo el colegio</span></label>
                     <label><input type="radio" name="Alcance" value="CURSOS" data-change="noticia-alcance" ${alcance === 'CURSOS' ? 'checked' : ''}><span>Cursos específicos</span></label>
                 </div>
-                <div class="check-list" data-cursos style="margin-top:10px" ${alcance === 'CURSOS' ? '' : 'hidden'}>${cursos.length
-                    ? cursos.map(c => `<label class="check-item"><input type="checkbox" name="CursoIDs" value="${esc(c.CursoID)}" ${sel.has(c.CursoID) ? 'checked' : ''}><span><strong>${esc(c.NombreCurso)}</strong></span></label>`).join('')
-                    : '<p class="muted">No tienes cursos asignados.</p>'}</div>
+                <div data-cursos style="margin-top:10px" ${alcance === 'CURSOS' ? '' : 'hidden'}>
+                    ${picker({ name: 'CursoIDs', items: cursos.map(itemCurso), selected: [...sel], filtros: [], placeholder: 'Buscar curso…', vacio: 'No tienes cursos asignados.' })}</div>
             </fieldset>
             <label class="field"><span>Visible hasta *</span><input type="date" name="VenceEl" required min="${today()}" value="${esc(n?.VenceEl || venceDef)}"></label>
             <label class="check-item" style="align-self:end"><input type="checkbox" name="Obligatoria" ${n?.Obligatoria ? 'checked' : ''}>
@@ -2645,13 +2661,11 @@ async function openEventoModal(e = null, { fecha = '', hora = '', tipo = '', est
                     <label><input type="radio" name="Alcance" value="CURSOS" data-change="evento-alcance" ${alcance === 'CURSOS' ? 'checked' : ''}><span>Cursos</span></label>
                     <label><input type="radio" name="Alcance" value="ALUMNOS" data-change="evento-alcance" ${alcance === 'ALUMNOS' ? 'checked' : ''}><span>Alumnos específicos</span></label>
                 </div>
-                <div class="check-list" data-cursos style="margin-top:10px" ${!esCita && alcance === 'CURSOS' ? '' : 'hidden'}>${cursos.length
-                    ? cursos.map(c => `<label class="check-item"><input type="checkbox" name="CursoIDs" value="${esc(c.CursoID)}" ${sel.has(c.CursoID) ? 'checked' : ''}><span><strong>${esc(c.NombreCurso)}</strong></span></label>`).join('')
-                    : '<p class="muted">No tienes cursos asignados.</p>'}</div>
-                <div class="check-list" data-alumnos style="margin-top:10px" ${esCita || alcance === 'ALUMNOS' ? '' : 'hidden'}>${alumnos.length
-                    ? alumnos.map(a => `<label class="check-item"><input type="checkbox" name="EstudianteIDs" value="${esc(a.ID)}" ${selA.has(a.ID) ? 'checked' : ''}>
-                        <span><strong>${esc(a.Nombre)}</strong><small>${esc(a.Grado || '')}${conPadres.has(a.ID) ? '' : ' · sin padres registrados'}</small></span></label>`).join('')
-                    : '<p class="muted">No hay alumnos en tus cursos.</p>'}</div>
+                <div data-cursos style="margin-top:10px" ${!esCita && alcance === 'CURSOS' ? '' : 'hidden'}>
+                    ${picker({ name: 'CursoIDs', items: cursos.map(itemCurso), selected: [...sel], filtros: [], placeholder: 'Buscar curso…', vacio: 'No tienes cursos asignados.' })}</div>
+                <div data-alumnos style="margin-top:10px" ${esCita || alcance === 'ALUMNOS' ? '' : 'hidden'}>
+                    ${picker({ name: 'EstudianteIDs', items: alumnos.map(a => ({ id: a.ID, nombre: a.Nombre, sub: `${a.Grado || 'Sin grado'}${conPadres.has(a.ID) ? '' : ' · sin padres registrados'}`, grado: a.Grado || '', user: a })),
+                        selected: [...selA], placeholder: 'Buscar alumno por nombre…', vacio: 'No hay alumnos en tus cursos.' })}</div>
                 <small class="field-hint" data-solo-cita ${esCita ? '' : 'hidden'}>La cita la ven solo los padres de los alumnos elegidos (el alumno no). Cada padre confirma si asistirá.</small>
             </fieldset>
         </div>`,
@@ -2677,6 +2691,85 @@ async function openEventoModal(e = null, { fecha = '', hora = '', tipo = '', est
         },
     });
 }
+
+// --------------------------------------------------------------------------
+// Buscador para elegir personas (u opciones) en listas largas.
+// - Busca por nombre mientras escribes (sin importar tildes ni mayúsculas).
+// - Filtra por grado y/o tipo de persona.
+// - Muestra pocos resultados a la vez (los elegidos siempre arriba) y chips de lo
+//   seleccionado para quitarlo con un clic.
+// Los inputs siguen dentro del formulario (FormData los lee aunque estén ocultos).
+// --------------------------------------------------------------------------
+
+const norm = (t) => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+const PICKER_MAX = 30;
+
+/** items: [{ id, nombre, sub, grado, tipo, user }] */
+function picker({ name, items, selected = [], multiple = true, filtros = ['grado'], placeholder = 'Buscar por nombre…', vacio = 'No hay opciones disponibles.', inputAttrs = () => '', required = false }) {
+    if (!items.length) return `<p class="muted">${esc(vacio)}</p>`;
+    const sel = new Set(selected);
+    const orden = [...items].sort((a, b) => (sel.has(b.id) - sel.has(a.id)) || a.nombre.localeCompare(b.nombre, 'es'));
+    const grados = [...new Set(items.map(i => i.grado).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'es', { numeric: true }));
+    const tipos = [...new Set(items.map(i => i.tipo).filter(Boolean))];
+    let visibles = 0;
+    const filas = orden.map(it => {
+        const marcado = sel.has(it.id);
+        const ver = marcado || visibles < PICKER_MAX;
+        if (ver && !marcado) visibles++;
+        return `<li data-pk data-n="${esc(norm(`${it.nombre} ${it.sub || ''}`))}" data-grado="${esc(it.grado || '')}" data-tipo="${esc(it.tipo || '')}" ${ver ? '' : 'hidden'}>
+            <label class="picker-item"><input type="${multiple ? 'checkbox' : 'radio'}" name="${esc(name)}" value="${esc(it.id)}" ${marcado ? 'checked' : ''} ${required && !multiple ? 'required' : ''} ${inputAttrs(it)}>
+            ${it.user ? avatar(it.user, 'sm') : ''}<span><strong>${esc(it.nombre)}</strong>${it.sub ? `<small>${esc(it.sub)}</small>` : ''}</span></label></li>`;
+    }).join('');
+    const total = items.length;
+    return `<div class="picker" data-picker data-multiple="${multiple ? 1 : 0}">
+        ${total > 6 ? `<div class="picker-tools">
+            <label class="picker-search">${ico('search', 'icon-sm')}<input type="search" placeholder="${esc(placeholder)}" data-input="picker" aria-label="${esc(placeholder)}" autocomplete="off"></label>
+            ${filtros.includes('tipo') && tipos.length > 1 ? `<select data-picker-filtro="tipo" aria-label="Filtrar por tipo"><option value="">Todos</option>${tipos.map(t => `<option>${esc(t)}</option>`).join('')}</select>` : ''}
+            ${filtros.includes('grado') && grados.length > 1 ? `<select data-picker-filtro="grado" aria-label="Filtrar por grado"><option value="">Todos los grados</option>${grados.map(g => `<option>${esc(g)}</option>`).join('')}</select>` : ''}
+        </div>` : ''}
+        ${multiple ? `<div class="picker-sel" data-picker-sel>${chipsPicker(orden.filter(i => sel.has(i.id)))}</div>` : ''}
+        <ul class="picker-list">${filas}</ul>
+        <div class="picker-foot"><small data-picker-foot>${pieTexto(Math.min(total, visibles + sel.size), total)}</small>
+            ${multiple && total > 6 ? '<button type="button" class="btn btn-link" data-action="picker-visibles" hidden>Seleccionar los mostrados</button>' : ''}</div>
+    </div>`;
+}
+
+const chipsPicker = (lista) => lista.map(i => `<span class="pk-chip">${esc(i.nombre)}<button type="button" data-action="picker-quitar" data-id="${esc(i.id)}" aria-label="Quitar ${esc(i.nombre)}">${ico('x', 'icon-xs')}</button></span>`).join('');
+const pieTexto = (n, total) => (n >= total ? `${total} en total` : `Mostrando ${n} de ${total} · escribe un nombre o filtra para encontrar más`);
+
+function filtrarPicker(root) {
+    const q = norm(root.querySelector('[data-input="picker"]')?.value).split(/\s+/).filter(Boolean);
+    const filtro = (k) => root.querySelector(`[data-picker-filtro="${k}"]`)?.value || '';
+    const grado = filtro('grado'), tipo = filtro('tipo');
+    const filas = [...root.querySelectorAll('[data-pk]')];
+    let mostrados = 0, coinciden = 0;
+    filas.forEach(li => {
+        const ok = q.every(w => li.dataset.n.includes(w)) && (!grado || li.dataset.grado === grado) && (!tipo || li.dataset.tipo === tipo);
+        const marcado = li.querySelector('input').checked;
+        if (ok) coinciden++;
+        const ver = ok && (marcado || mostrados < PICKER_MAX);
+        if (ver && !marcado) mostrados++;
+        li.hidden = !ver;
+    });
+    const pie = root.querySelector('[data-picker-foot]');
+    if (pie) pie.textContent = coinciden ? pieTexto(filas.filter(li => !li.hidden).length, coinciden) : 'Sin resultados. Prueba con otro nombre o grado.';
+    const btn = root.querySelector('[data-action="picker-visibles"]');
+    if (btn) btn.hidden = !(q.length || grado || tipo) || !coinciden;
+}
+
+function actualizarChips(root) {
+    const box = root.querySelector('[data-picker-sel]');
+    if (!box) return;
+    const elegidos = [...root.querySelectorAll('[data-pk] input:checked')].map(i => ({ id: i.value, nombre: i.closest('label').querySelector('strong').textContent }));
+    box.innerHTML = chipsPicker(elegidos);
+}
+
+document.addEventListener('change', (ev) => {
+    const root = ev.target.closest('[data-picker]');
+    if (!root) return;
+    if (ev.target.matches('[data-picker-filtro]')) filtrarPicker(root);
+    else actualizarChips(root);
+});
 
 // ==========================================================================
 // 9e. MENSAJES: conversaciones privadas, silenciar y bloquear
@@ -2706,6 +2799,13 @@ function actualizarInsignia() {
     $$('[data-nav-badge]').forEach(b => { b.hidden = !n; b.textContent = n > 9 ? '9+' : String(n); });
 }
 
+// Se calcula una vez por cada carga de datos (las listas pueden tener cientos de filas).
+let contactosCache = { db: null, ids: new Set() };
+function puedoEscribirA(u) {
+    if (contactosCache.db !== state.db) contactosCache = { db: state.db, ids: new Set(contactosDisponibles().map(c => c.ID)) };
+    return !!u && contactosCache.ids.has(u.ID);
+}
+
 /** Con quién puede iniciar una conversación cada rol. */
 function contactosDisponibles() {
     const me = state.me;
@@ -2725,6 +2825,18 @@ function contactosDisponibles() {
     }
     return [...new Map(lista.map(u => [u.ID, u])).values()].sort(byName);
 }
+
+/** Personas como opciones del buscador. */
+function itemPersona(u) {
+    const tipo = { ESTUDIANTE: 'Alumnos', PADRE: 'Padres', TUTOR: 'Maestros', ADMIN: 'Administración' }[u.Rol] || '';
+    let grado = u.Grado || '';
+    if (u.Rol === ROLES.PADRE) {
+        const hijos = String(u.HijosIDs || '').split(',').map(id => idx.users.get(id)).filter(Boolean);
+        grado = hijos[0]?.Grado || '';
+    }
+    return { id: u.ID, nombre: u.Nombre, sub: etiquetaContacto(u), grado, tipo, user: u };
+}
+const itemCurso = (c) => ({ id: c.CursoID, nombre: c.NombreCurso, sub: tutorDe(c) });
 
 function etiquetaContacto(u) {
     if (u.Rol === ROLES.PADRE) {
@@ -2861,19 +2973,23 @@ async function enviarEnConversacion(form) {
 }
 
 async function nuevoMensaje(paraId = '') {
+    // Si ya hay conversación con esa persona, se abre directamente.
+    const existente = paraId && state.db.conversaciones.find(c => soyMiembro(c) && otroDe(c) === paraId);
+    if (existente) return go(`mensajes/${encodeURIComponent(existente.ConvID)}`);
     const contactos = contactosDisponibles();
     if (!contactos.length) return toast('Aún no tienes contactos disponibles para escribir.', 'info');
     const r = await openModal({
         title: 'Nuevo mensaje',
         wide: true,
         submitLabel: 'Enviar',
-        body: `<label class="field"><span>Para *</span><select name="ParaID" required>
-                <option value="">Elige a quién escribir…</option>
-                ${contactos.map(u => `<option value="${esc(u.ID)}" ${u.ID === paraId ? 'selected' : ''}>${esc(u.Nombre)} — ${esc(etiquetaContacto(u))}</option>`).join('')}
-            </select></label>
+        body: `<div class="field"><span>Para *</span>
+                ${picker({ name: 'ParaID', items: contactos.map(itemPersona), selected: paraId ? [paraId] : [], multiple: false, filtros: ['tipo', 'grado'], placeholder: 'Buscar por nombre…' })}</div>
             <label class="field"><span>Mensaje *</span><textarea name="Texto" rows="5" maxlength="2000" required></textarea></label>
             <p class="muted" style="font-size:13px">La administración del colegio puede ver las conversaciones.</p>`,
-        onSubmit: async (fd) => withBusy(() => api('enviarMensaje', { ParaID: fd.get('ParaID'), Texto: fd.get('Texto') })),
+        onSubmit: async (fd) => {
+            if (!fd.get('ParaID')) throw new Error('Elige a quién escribir.');
+            return withBusy(() => api('enviarMensaje', { ParaID: fd.get('ParaID'), Texto: fd.get('Texto') }));
+        },
     });
     if (r && r.ConvID) {
         await refresh();
@@ -3342,7 +3458,22 @@ const ACTIONS = {
     },
     'ver-entregas': (el) => verEntregas(el.dataset.id),
     'nuevo-mensaje': (el) => nuevoMensaje(el.dataset.para || ''),
+    'users-mas': () => { state.usersFilter.limite = (state.usersFilter.limite || 50) + 50; $('#users-table').innerHTML = usersTable(); },
+    'picker-quitar': (el) => {
+        const root = el.closest('[data-picker]');
+        const input = [...root.querySelectorAll('[data-pk] input')].find(i => i.value === el.dataset.id);
+        if (input) { input.checked = false; input.dispatchEvent(new Event('change', { bubbles: true })); }
+        filtrarPicker(root);
+    },
+    'picker-visibles': (el) => {
+        const root = el.closest('[data-picker]');
+        root.querySelectorAll('[data-pk]:not([hidden]) input:not(:checked):not(:disabled)').forEach(i => {
+            i.checked = true;
+            i.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+    },
     'restringir': (el) => restringir(el.dataset.otro),
+    'cita-alumno': (el) => openEventoModal(null, { tipo: 'CITA', estIds: [el.dataset.est] }),
     'responder-cita': async (el) => {
         const e = state.db.eventos.find(x => x.EventoID === el.dataset.id);
         if (el.dataset.r === 'ASISTIRE') {
@@ -3459,11 +3590,13 @@ const ACTIONS = {
 };
 
 const INPUTS = {
-    'users-q': (el) => { state.usersFilter.q = el.value; $('#users-table').innerHTML = usersTable(); },
+    'users-q': (el) => { state.usersFilter.q = el.value; state.usersFilter.limite = 50; $('#users-table').innerHTML = usersTable(); },
     'gb-cell': (el) => gbOnInput(el),
+    'picker': (el) => filtrarPicker(el.closest('[data-picker]')),
 };
 
 const CHANGES = {
+    'users-grado': (el) => { state.usersFilter.grado = el.value; state.usersFilter.limite = 50; $('#users-table').innerHTML = usersTable(); },
     'gb-curso': (el) => {
         if (state.gb.draft.size && !confirm('Hay notas sin guardar en este curso. ¿Descartarlas?')) { el.value = state.gb.cursoId; return; }
         state.gb.draft.clear(); state.gb.cursoId = el.value; state.gb.unidad = 'all'; render();

@@ -82,7 +82,7 @@ const callApi = httpsCallable(functions, 'api', { timeout: 120000 });
 const emptyDb = () => ({
     users: [], cursos: [], unidades: [], pensum: [], items: [], inscripciones: [],
     entregas: [], asistencia: [], auditoria: [], bitacora: [],
-    noticias: [], lecturas: [], anotaciones: [],
+    noticias: [], lecturas: [], anotaciones: [], eventos: [],
 });
 
 const state = {
@@ -473,22 +473,29 @@ function attendanceStats(estId, cursoId = null) {
 // 6. NAVEGACIÓN / ROUTER (hash)
 // ==========================================================================
 
+/** Menú por categorías (acordeones). Cada entrada: [vista, etiqueta, ícono]. */
 const NAV = {
     ADMIN: [
-        ['dashboard', 'Resumen', 'layout-dashboard'], ['muro', 'Muro', 'newspaper'], ['usuarios', 'Usuarios', 'users'], ['cursos', 'Cursos', 'book-open'],
-        ['calificaciones', 'Calificaciones', 'clipboard-list'], ['asistencia', 'Asistencia', 'calendar-check'],
-        ['auditoria', 'Auditoría', 'history'], ['perfil', 'Mi perfil', 'circle-user'],
+        ['General', [['dashboard', 'Resumen', 'layout-dashboard'], ['muro', 'Muro', 'newspaper'], ['agenda', 'Agenda', 'calendar-days']]],
+        ['Académico', [['grados', 'Grados', 'school'], ['cursos', 'Cursos', 'book-open'], ['calificaciones', 'Calificaciones', 'clipboard-list'], ['asistencia', 'Asistencia', 'calendar-check']]],
+        ['Administración', [['usuarios', 'Usuarios', 'users'], ['auditoria', 'Auditoría', 'history']]],
+        ['Mi cuenta', [['perfil', 'Mi perfil', 'circle-user']]],
     ],
     TUTOR: [
-        ['dashboard', 'Resumen', 'layout-dashboard'], ['muro', 'Muro', 'newspaper'], ['cursos', 'Mis cursos', 'book-open'], ['usuarios', 'Mis estudiantes', 'graduation-cap'],
-        ['calificaciones', 'Calificaciones', 'clipboard-list'], ['asistencia', 'Asistencia', 'calendar-check'],
-        ['auditoria', 'Bitácora', 'history'], ['perfil', 'Mi perfil', 'circle-user'],
+        ['General', [['dashboard', 'Resumen', 'layout-dashboard'], ['muro', 'Muro', 'newspaper'], ['agenda', 'Agenda', 'calendar-days']]],
+        ['Mis clases', [['grados', 'Grados', 'school'], ['cursos', 'Mis cursos', 'book-open'], ['usuarios', 'Mis estudiantes', 'graduation-cap']]],
+        ['Evaluación', [['calificaciones', 'Calificaciones', 'clipboard-list'], ['asistencia', 'Asistencia', 'calendar-check'], ['auditoria', 'Bitácora', 'history']]],
+        ['Mi cuenta', [['perfil', 'Mi perfil', 'circle-user']]],
     ],
     ESTUDIANTE: [
-        ['muro', 'Muro', 'newspaper'], ['inicio', 'Inicio', 'house'], ['mis-cursos', 'Mis cursos', 'book-open'],
-        ['mi-asistencia', 'Asistencia', 'calendar-check'], ['perfil', 'Mi perfil', 'circle-user'],
+        ['General', [['muro', 'Muro', 'newspaper'], ['inicio', 'Inicio', 'house'], ['agenda', 'Agenda', 'calendar-days']]],
+        ['Mis estudios', [['mis-cursos', 'Mis cursos', 'book-open'], ['mi-asistencia', 'Asistencia', 'calendar-check']]],
+        ['Mi cuenta', [['perfil', 'Mi perfil', 'circle-user']]],
     ],
-    PADRE: [['muro', 'Muro', 'newspaper'], ['progreso', 'Progreso', 'trending-up']],
+    PADRE: [
+        ['General', [['muro', 'Muro', 'newspaper'], ['agenda', 'Agenda', 'calendar-days']]],
+        ['Mis hijos', [['progreso', 'Progreso', 'trending-up']]],
+    ],
 };
 // Alumnos y padres entran primero al muro (noticias y pendientes).
 const HOME = { ADMIN: 'dashboard', TUTOR: 'dashboard', ESTUDIANTE: 'muro', PADRE: 'muro' };
@@ -503,6 +510,9 @@ const VIEWS = {
     calificaciones:  { roles: T, title: () => 'Libro de calificaciones', render: viewCalificaciones, after: gbAfterRender },
     asistencia:      { roles: T, title: () => 'Asistencia', render: viewAsistencia },
     auditoria:       { roles: T, title: () => isAdmin() ? 'Auditoría' : 'Bitácora de mis estudiantes', render: viewAuditoria },
+    grados:          { roles: T, title: () => 'Grados', render: viewGrados },
+    grado:           { roles: T, nav: 'grados', title: g => g || 'Grado', render: viewGrado },
+    agenda:          { roles: [ROLES.ADMIN, ROLES.TUTOR, ROLES.ESTUDIANTE, ROLES.PADRE], title: () => 'Agenda', render: viewAgenda, after: agendaAfter },
     inicio:          { roles: E, title: () => 'Inicio', render: viewStudentHome },
     'mis-cursos':    { roles: E, title: () => 'Mis cursos', render: viewStudentCursos },
     'mi-asistencia': { roles: E, title: () => 'Mi asistencia', render: viewStudentAsistencia },
@@ -560,15 +570,50 @@ function render() {
     document.title = `${def.title(param)} · Plataforma Educativa`;
     $$('#nav .nav-link').forEach(a => a.toggleAttribute('aria-current', a.dataset.view === (def.nav || view)));
     $$('#nav .nav-link[aria-current]').forEach(a => a.setAttribute('aria-current', 'page'));
+    const grupoActual = $('#nav .nav-link[aria-current]')?.closest('.nav-group');
+    if (grupoActual && !grupoActual.classList.contains('is-open')) toggleGrupo(grupoActual, true);
     $('#view').innerHTML = def.render(param);
     def.after?.(param);
     $('#screen-app').classList.remove('sidebar-open');
+    aplicarMenuOculto();
+}
+
+// Preferencias del menú (solo de este navegador; si no se pueden guardar, no pasa nada).
+const PREF = {
+    get(k, def) { try { const v = localStorage.getItem(`pe-${k}`); return v == null ? def : JSON.parse(v); } catch { return def; } },
+    set(k, v) { try { localStorage.setItem(`pe-${k}`, JSON.stringify(v)); } catch { /* sin almacenamiento */ } },
+};
+const esEscritorio = () => matchMedia('(min-width: 961px)').matches;
+
+function toggleGrupo(g, abrir = !g.classList.contains('is-open')) {
+    g.classList.toggle('is-open', abrir);
+    g.querySelector('.nav-group-head').setAttribute('aria-expanded', String(abrir));
+    const abiertos = new Set(PREF.get('menu-abiertos', []));
+    abrir ? abiertos.add(g.dataset.group) : abiertos.delete(g.dataset.group);
+    PREF.set('menu-abiertos', [...abiertos]);
+}
+
+function aplicarMenuOculto() {
+    const oculto = esEscritorio() && PREF.get('menu-oculto', false);
+    $('#screen-app').classList.toggle('sidebar-collapsed', oculto);
+    const btn = $('.menu-btn');
+    const abierto = esEscritorio() ? !oculto : $('#screen-app').classList.contains('sidebar-open');
+    btn?.setAttribute('aria-expanded', String(abierto));
+    btn?.setAttribute('aria-label', abierto ? 'Ocultar menú' : 'Mostrar menú');
 }
 
 function renderChrome() {
     const me = state.me;
-    $('#nav').innerHTML = NAV[me.Rol].map(([v, label, icon]) =>
-        `<a class="nav-link" href="#/${v}" data-view="${v}"><span class="nav-icon">${ico(icon)}</span>${esc(label)}</a>`).join('');
+    const abiertos = new Set(PREF.get('menu-abiertos', []));
+    $('#nav').innerHTML = NAV[me.Rol].map(([grupo, links]) => {
+        const abierto = abiertos.has(grupo);
+        return `<div class="nav-group${abierto ? ' is-open' : ''}" data-group="${esc(grupo)}">
+            <button type="button" class="nav-group-head" data-action="nav-group" aria-expanded="${abierto}"><span>${esc(grupo)}</span>${ico('chevron-down', 'icon-sm')}</button>
+            <div class="nav-group-body"><div>${links.map(([v, label, icon]) =>
+                `<a class="nav-link" href="#/${v}" data-view="${v}"><span class="nav-icon">${ico(icon)}</span>${esc(label)}</a>`).join('')}</div></div>
+        </div>`;
+    }).join('');
+    aplicarMenuOculto();
     $('#user-chip').innerHTML = `${avatar(me)}<div><strong>${esc(me.Nombre)}</strong>${roleBadge(me.Rol)}</div>`;
 }
 
@@ -2044,6 +2089,420 @@ function viewPerfil() {
 }
 
 // ==========================================================================
+// 9c. GRADOS: alumnos, cursos, resultados y asistencia por grado
+// ==========================================================================
+
+const gradoDe = (u) => String(u?.Grado || '').trim();
+/** Cursos que cuentan en Grados: el admin todos; el maestro solo los suyos. */
+const cursosDeGrados = () => (isAdmin() ? cursosOrdenados() : cursosGestionables());
+
+/** Grados ingresados en el perfil de los alumnos visibles (el maestro: alumnos de sus cursos). */
+function gradosVisibles() {
+    const alumnos = isAdmin() ? students()
+        : [...new Map(cursosGestionables().flatMap(c => alumnosDe(c.CursoID)).map(a => [a.ID, a])).values()];
+    const map = new Map();
+    alumnos.forEach(a => {
+        const g = gradoDe(a);
+        if (!g) return;
+        if (!map.has(g)) map.set(g, []);
+        map.get(g).push(a);
+    });
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0], 'es', { numeric: true }))
+        .map(([nombre, lista]) => ({ nombre, alumnos: lista.sort(byName) }));
+}
+
+function resumenGrado(g) {
+    const ids = new Set(g.alumnos.map(a => a.ID));
+    const visibles = cursosDeGrados();
+    const visiblesIds = new Set(visibles.map(c => c.CursoID));
+    const cursos = visibles.map(c => {
+        const delGrado = alumnosDe(c.CursoID).filter(a => ids.has(a.ID));
+        if (!delGrado.length) return null;
+        const finales = delGrado.map(a => Grades.forStudent(a.ID, c.CursoID).final);
+        const est = finales.map(f => estadoFinal(f, c));
+        return {
+            c, n: delGrado.length, prom: mean(finales),
+            aprobados: est.filter(e => e === 'aprobado').length,
+            reprobados: est.filter(e => e === 'reprobado').length,
+            sinNotas: est.filter(e => e === 'sin-notas').length,
+        };
+    }).filter(Boolean);
+    const alumnos = g.alumnos.map(a => {
+        const cs = cursosDe(a.ID).filter(c => visiblesIds.has(c.CursoID));
+        const finales = cs.map(c => ({ c, f: Grades.forStudent(a.ID, c.CursoID).final }));
+        const est = finales.map(x => estadoFinal(x.f, x.c));
+        return {
+            a, cursos: cs.length, prom: mean(finales.map(x => x.f)), asist: attendanceStats(a.ID),
+            aprobados: est.filter(e => e === 'aprobado').length, reprobados: est.filter(e => e === 'reprobado').length,
+        };
+    });
+    return {
+        cursos, alumnos,
+        prom: mean(alumnos.map(x => x.prom)),
+        asist: mean(alumnos.map(x => x.asist.pct)),
+        conReprobados: alumnos.filter(x => x.reprobados).length,
+    };
+}
+
+const pctTexto = (v) => (v == null ? '—' : `${fmtNota(v)}%`);
+
+function viewGrados() {
+    const grados = gradosVisibles();
+    if (!grados.length) {
+        return `<section class="card">${emptyState(isAdmin()
+            ? 'Todavía no hay grados. El grado se toma del perfil de cada alumno (campo "Grado / Nivel académico").'
+            : 'Tus estudiantes aún no tienen grado asignado en su perfil.', 'school')}</section>`;
+    }
+    return `<p class="muted">${grados.length} grado(s) con alumnos${isAdmin() ? '' : ' en tus cursos'}. El grado se toma del perfil de cada alumno.</p>
+    <div class="grid grid-cards">${grados.map(g => {
+        const r = resumenGrado(g);
+        return `<a class="card grade-card" href="#/grado/${encodeURIComponent(g.nombre)}">
+            <div class="row-between"><h3 class="meta-line">${ico('school')} ${esc(g.nombre)}</h3>${ico('chevron-right', 'icon-sm')}</div>
+            <div class="course-stats"><span>${g.alumnos.length} alumno(s)</span><span>${r.cursos.length} curso(s)</span><span>Asistencia ${pctTexto(r.asist)}</span></div>
+            <div class="row"><span class="muted">Promedio</span>${gradePill(r.prom)}
+                ${r.conReprobados ? `<span class="badge badge-danger">${r.conReprobados} con cursos reprobados</span>` : '<span class="badge badge-success">Sin reprobados</span>'}</div>
+        </a>`;
+    }).join('')}</div>`;
+}
+
+function viewGrado(nombre) {
+    const g = gradosVisibles().find(x => x.nombre === nombre);
+    const volver = `<div><a class="btn btn-link" href="#/grados">${ico('arrow-left')} Grados</a></div>`;
+    if (!g) return `${volver}<section class="card">${emptyState('Este grado ya no tiene alumnos visibles.', 'school')}</section>`;
+    const r = resumenGrado(g);
+    return `${volver}
+    <div class="grid grid-kpi">
+        ${kpi('Alumnos', g.alumnos.length, '', 'graduation-cap')}
+        ${kpi('Promedio del grado', fmtNota(r.prom), '', 'award')}
+        ${kpi('Asistencia', pctTexto(r.asist), '', 'calendar-check')}
+        ${kpi('Con cursos reprobados', r.conReprobados, `de ${g.alumnos.length} alumno(s)`, 'alert-triangle')}
+    </div>
+    <section class="card"><div class="card-head"><h2>Cursos del grado</h2><small class="muted">Resultados solo de los alumnos de ${esc(g.nombre)}</small></div>
+        ${r.cursos.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Curso</th><th>Profesor</th><th class="num">Alumnos</th>
+            <th class="center">Promedio</th><th class="center">Aprobados</th><th class="center">Reprobados</th><th class="center">Sin notas</th><th></th></tr></thead>
+        <tbody>${r.cursos.map(x => `<tr><td><strong>${esc(x.c.NombreCurso)}</strong><br><small class="muted">Aprueba con ${fmtNota(aprobDe(x.c.CursoID))}</small></td>
+            <td>${esc(tutorDe(x.c))}</td><td class="num">${x.n}</td>
+            <td class="center"><span class="grade-pill ${gradeClass(x.prom, aprobDe(x.c.CursoID))}">${fmtNota(x.prom)}</span></td>
+            <td class="center"><span class="badge badge-success">${x.aprobados}</span></td>
+            <td class="center"><span class="badge ${x.reprobados ? 'badge-danger' : ''}">${x.reprobados}</span></td>
+            <td class="center"><span class="badge">${x.sinNotas}</span></td>
+            <td class="actions">${canManage(x.c.CursoID) ? `<a class="btn btn-ghost btn-sm" href="#/curso/${encodeURIComponent(x.c.CursoID)}">Abrir curso</a>` : ''}</td></tr>`).join('')}</tbody></table></div>`
+        : emptyState('Los alumnos de este grado no están inscritos en cursos.', 'book-open')}
+    </section>
+    <section class="card"><div class="card-head"><h2>Alumnos del grado</h2></div>
+        <div class="table-wrap"><table class="table"><thead><tr><th>Alumno</th><th class="center">Promedio</th><th class="center">Cursos aprobados</th>
+            <th class="center">Cursos reprobados</th><th class="center">Asistencia</th><th class="num">Ausencias</th><th></th></tr></thead>
+        <tbody>${r.alumnos.map(x => `<tr><td>${person(x.a, `${x.cursos} curso(s)`)}</td>
+            <td class="center">${gradePill(x.prom)}</td>
+            <td class="center"><span class="badge badge-success">${x.aprobados}</span></td>
+            <td class="center"><span class="badge ${x.reprobados ? 'badge-danger' : ''}">${x.reprobados}</span></td>
+            <td class="center">${pctTexto(x.asist.pct)}</td><td class="num">${x.asist.Ausente}</td>
+            <td class="actions"><a class="btn btn-ghost btn-sm" href="#/estudiante/${encodeURIComponent(x.a.ID)}">Ver perfil</a></td></tr>`).join('')}</tbody></table></div>
+    </section>`;
+}
+
+// ==========================================================================
+// 9d. AGENDA: calendario de eventos (mes, semana, día y lista)
+// ==========================================================================
+
+const AG_MODOS = [['mes', 'Mes'], ['semana', 'Semana'], ['dia', 'Día'], ['lista', 'Lista']];
+const AG_COLORES = [['azul', 'Azul'], ['verde', 'Verde'], ['ambar', 'Ámbar'], ['rojo', 'Rojo'], ['morado', 'Morado'], ['gris', 'Gris']];
+const DIAS_CORTOS = ['dom', 'lun', 'mar', 'mié', 'jue', 'vie', 'sáb'];
+const HORA_PX = 48;
+const LISTA_DIAS = 30;
+
+const aFecha = (iso) => { const [y, m, d] = iso.split('-').map(Number); return new Date(y, m - 1, d); };
+const isoDe = (d) => d.toLocaleDateString('en-CA');
+const sumarDias = (iso, n) => { const d = aFecha(iso); d.setDate(d.getDate() + n); return isoDe(d); };
+const aMin = (h) => { const [a, b] = String(h).split(':').map(Number); return a * 60 + (b || 0); };
+const inicioSemana = (iso) => sumarDias(iso, -aFecha(iso).getDay());
+const fechaLarga = (iso) => aFecha(iso).toLocaleDateString('es-GT', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+function agenda() {
+    return state.agenda ||= { modo: matchMedia('(max-width: 600px)').matches ? 'lista' : 'mes', fecha: today(), entregas: true };
+}
+
+/** Evaluaciones con fecha de entrega que le corresponden a quien mira. */
+function itemsAgenda() {
+    const items = state.db.items.filter(i => i.FechaEntrega);
+    return esStaff() && !isAdmin() ? items.filter(i => canManage(i.CursoID)) : items;
+}
+
+/** Ocurrencias entre dos fechas (incluidas): eventos (uno por día) y fechas de entrega. */
+function ocurrencias(desde, hasta) {
+    const out = [];
+    for (const e of state.db.eventos) {
+        const fin = e.FechaFin || e.Fecha;
+        if (fin < desde || e.Fecha > hasta) continue;
+        const varios = fin !== e.Fecha;
+        for (let d = e.Fecha > desde ? e.Fecha : desde; d <= fin && d <= hasta; d = sumarDias(d, 1)) {
+            out.push({ tipo: 'evento', id: e.EventoID, fecha: d, titulo: e.Titulo, color: e.Color || 'azul',
+                todoElDia: !!e.TodoElDia || varios, ini: e.HoraInicio, fin: e.HoraFin, lugar: e.Lugar });
+        }
+    }
+    if (agenda().entregas) {
+        for (const i of itemsAgenda()) {
+            if (i.FechaEntrega < desde || i.FechaEntrega > hasta) continue;
+            out.push({ tipo: 'entrega', id: i.ItemID, fecha: i.FechaEntrega, titulo: `Entrega: ${i.Titulo}`, color: 'entrega',
+                todoElDia: true, lugar: idx.cursos.get(i.CursoID)?.NombreCurso || '' });
+        }
+    }
+    return out.sort((a, b) => (b.todoElDia - a.todoElDia) || String(a.ini || '').localeCompare(String(b.ini || '')) || a.titulo.localeCompare(b.titulo, 'es'));
+}
+
+const porFecha = (ocs) => ocs.reduce((m, o) => (m.get(o.fecha)?.push(o) || m.set(o.fecha, [o]), m), new Map());
+
+function evChip(o) {
+    const hora = o.todoElDia ? '' : `<span class="ev-time">${esc(o.ini)}</span>`;
+    return `<button type="button" class="ev-chip ev-${esc(o.color)}${o.todoElDia ? ' is-allday' : ''}" data-action="ver-evento" data-tipo="${o.tipo}" data-id="${esc(o.id)}"
+        title="${esc(o.titulo)}${o.lugar ? ' · ' + esc(o.lugar) : ''}">${hora}<span class="ev-title">${esc(o.titulo)}</span></button>`;
+}
+
+function agTitulo(ag) {
+    if (ag.modo === 'mes') return aFecha(ag.fecha).toLocaleDateString('es-GT', { month: 'long', year: 'numeric' });
+    if (ag.modo === 'dia') return fechaLarga(ag.fecha);
+    if (ag.modo === 'lista') return `Próximos ${LISTA_DIAS} días desde ${fmtDate(ag.fecha)}`;
+    const ini = inicioSemana(ag.fecha);
+    return `${fmtDate(ini)} – ${fmtDate(sumarDias(ini, 6))}`;
+}
+
+function viewAgenda() {
+    const ag = agenda();
+    const cuerpo = { mes: calMes, semana: calSemana, dia: calSemana, lista: calLista }[ag.modo](ag);
+    return `<section class="card cal">
+        <div class="cal-toolbar">
+            <div class="row cal-nav">
+                <button type="button" class="btn btn-ghost btn-sm" data-action="agenda-nav" data-dir="0">Hoy</button>
+                <button type="button" class="icon-btn" data-action="agenda-nav" data-dir="-1" aria-label="Anterior">${ico('chevron-left')}</button>
+                <button type="button" class="icon-btn" data-action="agenda-nav" data-dir="1" aria-label="Siguiente">${ico('chevron-right')}</button>
+                <h2 class="cal-title">${esc(agTitulo(ag).replace(/^./, (x) => x.toUpperCase()))}</h2>
+            </div>
+            <div class="row">
+                <div class="segmented" role="radiogroup" aria-label="Vista del calendario">${AG_MODOS.map(([v, l]) =>
+                    `<label><input type="radio" name="agmodo" value="${v}" data-change="agenda-modo" ${ag.modo === v ? 'checked' : ''}><span>${l}</span></label>`).join('')}</div>
+                ${esStaff() ? `<button type="button" class="btn btn-primary btn-sm" data-action="new-evento">${ico('plus')} Evento</button>` : ''}
+            </div>
+        </div>
+        <div class="cal-legend">
+            <label class="check-inline"><input type="checkbox" data-change="agenda-entregas" ${ag.entregas ? 'checked' : ''}><span>Mostrar fechas de entrega de tareas y exámenes</span></label>
+            <span class="ev-chip ev-entrega is-allday" aria-hidden="true"><span class="ev-title">Entrega</span></span>
+        </div>
+        ${cuerpo}
+    </section>`;
+}
+
+function calMes(ag) {
+    const f = aFecha(ag.fecha);
+    const primero = isoDe(new Date(f.getFullYear(), f.getMonth(), 1));
+    const diasMes = new Date(f.getFullYear(), f.getMonth() + 1, 0).getDate();
+    const offset = aFecha(primero).getDay();
+    const semanas = Math.ceil((offset + diasMes) / 7);
+    const desde = sumarDias(primero, -offset), hasta = sumarDias(desde, semanas * 7 - 1);
+    const mapa = porFecha(ocurrencias(desde, hasta));
+    const hoy = today(), mes = f.getMonth();
+    const celdas = [];
+    for (let k = 0; k < semanas * 7; k++) {
+        const d = sumarDias(desde, k);
+        const lista = mapa.get(d) || [];
+        const extra = lista.length - 3;
+        celdas.push(`<div class="cal-cell${aFecha(d).getMonth() !== mes ? ' is-out' : ''}${d === hoy ? ' is-today' : ''}"
+            ${esStaff() ? `data-action="new-evento" data-fecha="${d}" title="Crear evento el ${fmtDate(d)}"` : ''}>
+            <button type="button" class="cal-daynum" data-action="agenda-ir" data-fecha="${d}" aria-label="Ver el ${fmtDate(d)}">${aFecha(d).getDate()}</button>
+            <div class="cal-chips">${lista.slice(0, extra > 0 ? 2 : 3).map(evChip).join('')}
+                ${extra > 0 ? `<button type="button" class="cal-more" data-action="agenda-ir" data-fecha="${d}">+${extra + 1} más</button>` : ''}</div>
+        </div>`);
+    }
+    return `<div class="cal-scroll"><div class="cal-month" style="--semanas:${semanas}">
+        ${DIAS_CORTOS.map(d => `<div class="cal-dow">${d}</div>`).join('')}${celdas.join('')}
+    </div></div>`;
+}
+
+/** Reparte en columnas los eventos que se cruzan (como en los calendarios de escritorio). */
+function columnas(evs) {
+    evs.sort((a, b) => a.s - b.s || b.e - a.e);
+    const out = [];
+    let grupo = [], finGrupo = -1;
+    const cerrar = () => {
+        const cols = [];
+        grupo.forEach(ev => {
+            let k = cols.findIndex(f => f <= ev.s);
+            if (k < 0) { k = cols.length; cols.push(0); }
+            cols[k] = ev.e; ev.col = k;
+        });
+        grupo.forEach(ev => { ev.ncol = cols.length; });
+        out.push(...grupo); grupo = [];
+    };
+    for (const ev of evs) {
+        if (grupo.length && ev.s >= finGrupo) cerrar();
+        grupo.push(ev); finGrupo = Math.max(finGrupo, ev.e);
+    }
+    if (grupo.length) cerrar();
+    return out;
+}
+
+function calSemana(ag) {
+    const dias = ag.modo === 'dia' ? [ag.fecha] : Array.from({ length: 7 }, (_, k) => sumarDias(inicioSemana(ag.fecha), k));
+    const mapa = porFecha(ocurrencias(dias[0], dias[dias.length - 1]));
+    const hoy = today();
+    const ahora = new Date();
+    const ahoraMin = ahora.getHours() * 60 + ahora.getMinutes();
+    const horas = Array.from({ length: 24 }, (_, h) => h);
+    const hh = (h) => `${String(h).padStart(2, '0')}:00`;
+    const cols = dias.map(d => {
+        const lista = mapa.get(d) || [];
+        const timed = columnas(lista.filter(o => !o.todoElDia).map(o => {
+            const s = aMin(o.ini);
+            const e = Math.min(1440, o.fin && aMin(o.fin) > s ? aMin(o.fin) : s + 60);
+            return { o, s, e };
+        }));
+        const evs = timed.map(({ o, s, e, col, ncol }) => `<button type="button" class="ev-block ev-${esc(o.color)}" data-action="ver-evento" data-tipo="${o.tipo}" data-id="${esc(o.id)}"
+            style="top:${s / 60 * HORA_PX}px;height:${Math.max(22, (e - s) / 60 * HORA_PX - 2)}px;left:calc(${col / ncol * 100}% + 2px);width:calc(${100 / ncol}% - 4px)">
+            <strong>${esc(o.titulo)}</strong><small>${esc(o.ini)}${o.fin ? '–' + esc(o.fin) : ''}${o.lugar ? ' · ' + esc(o.lugar) : ''}</small></button>`).join('');
+        const slots = horas.map(h => esStaff()
+            ? `<div class="cal-slot" data-action="new-evento" data-fecha="${d}" data-hora="${hh(h)}" title="Crear evento ${fmtDate(d)} ${hh(h)}"></div>`
+            : '<div class="cal-slot"></div>').join('');
+        const linea = d === hoy ? `<div class="cal-now" style="top:${ahoraMin / 60 * HORA_PX}px"></div>` : '';
+        return `<div class="cal-col${d === hoy ? ' is-today' : ''}">${slots}${evs}${linea}</div>`;
+    });
+    return `<div class="cal-scroll"><div class="cal-week" style="--dias:${dias.length}">
+        <div class="cal-week-head"><div class="cal-gutter"></div>${dias.map(d => `<button type="button" class="cal-wday${d === hoy ? ' is-today' : ''}" data-action="agenda-ir" data-fecha="${d}">
+            <span>${DIAS_CORTOS[aFecha(d).getDay()]}</span><strong>${aFecha(d).getDate()}</strong></button>`).join('')}</div>
+        <div class="cal-allday"><div class="cal-gutter"><small>Todo el día</small></div>${dias.map(d =>
+            `<div class="cal-allday-cell">${(mapa.get(d) || []).filter(o => o.todoElDia).map(evChip).join('')}</div>`).join('')}</div>
+        <div class="cal-grid-scroll" data-cal-scroll>
+            <div class="cal-grid" style="--hora:${HORA_PX}px">
+                <div class="cal-hours">${horas.map(h => `<div class="cal-hour"><span>${h ? hh(h) : ''}</span></div>`).join('')}</div>
+                ${cols.join('')}
+            </div>
+        </div>
+    </div></div>`;
+}
+
+function calLista(ag) {
+    const hasta = sumarDias(ag.fecha, LISTA_DIAS - 1);
+    const mapa = porFecha(ocurrencias(ag.fecha, hasta));
+    if (!mapa.size) return emptyState(`No hay eventos entre el ${fmtDate(ag.fecha)} y el ${fmtDate(hasta)}.`, 'calendar');
+    const hoy = today();
+    return `<div class="cal-list">${[...mapa.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([d, lista]) => `
+        <div class="cal-list-day${d === hoy ? ' is-today' : ''}">
+            <button type="button" class="cal-list-date" data-action="agenda-ir" data-fecha="${d}"><strong>${aFecha(d).getDate()}</strong>
+                <span>${DIAS_CORTOS[aFecha(d).getDay()]} · ${aFecha(d).toLocaleDateString('es-GT', { month: 'short' })}</span></button>
+            <div class="cal-list-items">${lista.map(o => `<button type="button" class="cal-list-item" data-action="ver-evento" data-tipo="${o.tipo}" data-id="${esc(o.id)}">
+                <span class="ev-dot ev-${esc(o.color)}"></span><span class="cal-list-time">${o.todoElDia ? 'Todo el día' : `${esc(o.ini)}${o.fin ? '–' + esc(o.fin) : ''}`}</span>
+                <span><strong>${esc(o.titulo)}</strong>${o.lugar ? `<small class="muted"> · ${esc(o.lugar)}</small>` : ''}</span></button>`).join('')}</div>
+        </div>`).join('')}</div>`;
+}
+
+function agendaAfter() {
+    const sc = $('[data-cal-scroll]');
+    if (sc) sc.scrollTop = 7 * HORA_PX;
+}
+
+function agendaNav(dir) {
+    const ag = agenda();
+    if (!dir) { ag.fecha = today(); return; }
+    if (ag.modo === 'mes') {
+        const f = aFecha(ag.fecha);
+        ag.fecha = isoDe(new Date(f.getFullYear(), f.getMonth() + dir, 1));
+    } else {
+        ag.fecha = sumarDias(ag.fecha, dir * { semana: 7, dia: 1, lista: LISTA_DIAS }[ag.modo]);
+    }
+}
+
+function cuandoEvento(e) {
+    const horas = e.TodoElDia ? 'Todo el día' : `${e.HoraInicio}${e.HoraFin ? '–' + e.HoraFin : ''}`;
+    return e.FechaFin && e.FechaFin !== e.Fecha
+        ? `${fmtDate(e.Fecha)} – ${fmtDate(e.FechaFin)} · ${horas}`
+        : `${fechaLarga(e.Fecha)} · ${horas}`;
+}
+
+async function verEvento(tipo, id) {
+    if (tipo === 'entrega') {
+        const it = idx.items.get(id);
+        if (!it) return;
+        const c = idx.cursos.get(it.CursoID);
+        const gestiona = canManage(it.CursoID) && esStaff();
+        const r = await openModal({
+            title: it.Titulo,
+            submitLabel: gestiona ? 'Ver entregas' : 'Cerrar',
+            body: `<p class="row">${tipoBadge(it.Tipo)}<strong>${esc(c?.NombreCurso || '')}</strong></p>
+                <p class="meta-line">${ico('clock', 'icon-sm')} Fecha de entrega: ${esc(fechaLarga(it.FechaEntrega))}</p>
+                <p class="muted">Ponderación ${fmtPeso(it.Ponderacion)}${it.PenalizacionTipo && it.PenalizacionTipo !== 'NINGUNA' ? ` · ${esc(reglaTexto(it))}` : ''}</p>
+                ${it.Descripcion ? `<p class="news-text">${esc(it.Descripcion)}</p>` : ''}`,
+            onSubmit: async () => (gestiona ? 'entregas' : true),
+        });
+        if (r === 'entregas') verEntregas(id);
+        return;
+    }
+    const e = state.db.eventos.find(x => x.EventoID === id);
+    if (!e) return;
+    const gestiona = isAdmin() || e.AutorID === state.me.ID;
+    const r = await openModal({
+        title: e.Titulo,
+        submitLabel: gestiona ? 'Editar' : 'Cerrar',
+        body: `<p class="meta-line"><span class="ev-dot ev-${esc(e.Color || 'azul')}"></span>${ico('clock', 'icon-sm')} ${esc(cuandoEvento(e))}</p>
+            ${e.Lugar ? `<p class="meta-line">${ico('map-pin', 'icon-sm')} ${esc(e.Lugar)}</p>` : ''}
+            ${e.Descripcion ? `<p class="news-text">${esc(e.Descripcion)}</p>` : ''}
+            <p class="muted" style="font-size:13px">Para: ${esc(alcanceTexto(e))} · Creado por ${esc(e.AutorNombre)}</p>
+            ${gestiona ? `<button type="button" class="btn btn-ghost btn-sm" data-action="delete-evento" data-id="${esc(e.EventoID)}">${ico('trash', 'icon-sm')} Eliminar evento</button>` : ''}`,
+        onSubmit: async () => (gestiona ? 'editar' : true),
+    });
+    if (r === 'editar') openEventoModal(e);
+}
+
+async function openEventoModal(e = null, { fecha = '', hora = '' } = {}) {
+    const cursos = cursosGestionables();
+    const alcance = e?.Alcance || 'COLEGIO';
+    const sel = new Set(e?.CursoIDs || []);
+    const todo = e ? !!e.TodoElDia : !hora;
+    const f = e?.Fecha || fecha || agenda().fecha || today();
+    const ini = e?.HoraInicio || hora || '08:00';
+    const finDef = e?.HoraFin || `${String(Math.min(23, aMin(ini) / 60 + 1 | 0)).padStart(2, '0')}:${ini.slice(3, 5) || '00'}`;
+    const color = e?.Color || 'azul';
+    await openModal({
+        title: e ? 'Editar evento' : 'Nuevo evento',
+        wide: true,
+        submitLabel: e ? 'Guardar cambios' : 'Crear evento',
+        body: `<div class="form-grid">
+            <label class="field span-all"><span>Título *</span><input name="Titulo" required maxlength="160" value="${esc(e?.Titulo)}" placeholder="Ej.: Reunión de padres"></label>
+            <label class="field"><span>Fecha *</span><input type="date" name="Fecha" required value="${esc(f)}"></label>
+            <label class="field"><span>Termina (si dura varios días)</span><input type="date" name="FechaFin" value="${esc(e?.FechaFin && e.FechaFin !== e.Fecha ? e.FechaFin : '')}"></label>
+            <label class="check-item span-all"><input type="checkbox" name="TodoElDia" data-change="evento-todo" ${todo ? 'checked' : ''}><span><strong>Todo el día</strong></span></label>
+            <label class="field" data-horas ${todo ? 'hidden' : ''}><span>Hora de inicio</span><input type="time" name="HoraInicio" value="${esc(ini)}"></label>
+            <label class="field" data-horas ${todo ? 'hidden' : ''}><span>Hora de fin</span><input type="time" name="HoraFin" value="${esc(finDef)}"></label>
+            <label class="field span-all"><span>Lugar</span><input name="Lugar" maxlength="160" value="${esc(e?.Lugar)}" placeholder="Ej.: Salón de actos"></label>
+            <label class="field span-all"><span>Descripción</span><textarea name="Descripcion" maxlength="2000" rows="3">${esc(e?.Descripcion)}</textarea></label>
+            <fieldset class="field span-all" style="border:0;padding:0;margin:0"><span>Color</span>
+                <div class="ev-colors">${AG_COLORES.map(([v, l]) => `<label class="ev-color" title="${l}"><input type="radio" name="Color" value="${v}" ${color === v ? 'checked' : ''}><span class="ev-swatch ev-${v}"></span><span class="sr-only">${l}</span></label>`).join('')}</div>
+            </fieldset>
+            <fieldset class="field span-all" style="border:0;padding:0;margin:0"><span>¿Para quién? *</span>
+                <div class="segmented" role="radiogroup" aria-label="Destinatarios">
+                    <label><input type="radio" name="Alcance" value="COLEGIO" data-change="noticia-alcance" ${alcance === 'COLEGIO' ? 'checked' : ''}><span>Todo el colegio</span></label>
+                    <label><input type="radio" name="Alcance" value="CURSOS" data-change="noticia-alcance" ${alcance === 'CURSOS' ? 'checked' : ''}><span>Cursos específicos</span></label>
+                </div>
+                <div class="check-list" data-cursos style="margin-top:10px" ${alcance === 'CURSOS' ? '' : 'hidden'}>${cursos.length
+                    ? cursos.map(c => `<label class="check-item"><input type="checkbox" name="CursoIDs" value="${esc(c.CursoID)}" ${sel.has(c.CursoID) ? 'checked' : ''}><span><strong>${esc(c.NombreCurso)}</strong></span></label>`).join('')
+                    : '<p class="muted">No tienes cursos asignados.</p>'}</div>
+            </fieldset>
+        </div>`,
+        onSubmit: async (fd) => {
+            const alc = fd.get('Alcance');
+            const cursoIds = fd.getAll('CursoIDs');
+            if (alc === 'CURSOS' && !cursoIds.length) throw new Error('Selecciona al menos un curso.');
+            const todoDia = fd.get('TodoElDia') === 'on';
+            await withBusy(() => api('saveEvento', {
+                EventoID: e?.EventoID, Titulo: fd.get('Titulo'), Fecha: fd.get('Fecha'), FechaFin: fd.get('FechaFin'),
+                TodoElDia: todoDia, HoraInicio: todoDia ? '' : fd.get('HoraInicio'), HoraFin: todoDia ? '' : fd.get('HoraFin'),
+                Lugar: fd.get('Lugar'), Descripcion: fd.get('Descripcion'), Color: fd.get('Color'), Alcance: alc, CursoIDs: cursoIds,
+            }));
+            agenda().fecha = fd.get('Fecha');
+            toast(e ? 'Evento actualizado.' : 'Evento creado.', 'success');
+            await refresh();
+        },
+    });
+}
+
+// ==========================================================================
 // 10. UI: MODALES, TOASTS, ARCHIVOS
 // ==========================================================================
 
@@ -2232,7 +2691,13 @@ const findUser = id => idx.users.get(id);
 const ACTIONS = {
     'toggle-password': (btn) => setPasswordVisible(btn, btn.getAttribute('aria-pressed') !== 'true'),
     'open-sidebar': () => $('#screen-app').classList.add('sidebar-open'),
-    'close-sidebar': () => $('#screen-app').classList.remove('sidebar-open'),
+    'close-sidebar': () => { $('#screen-app').classList.remove('sidebar-open'); aplicarMenuOculto(); },
+    'toggle-sidebar': () => {
+        if (esEscritorio()) PREF.set('menu-oculto', !PREF.get('menu-oculto', false));
+        else $('#screen-app').classList.toggle('sidebar-open');
+        aplicarMenuOculto();
+    },
+    'nav-group': (el) => toggleGrupo(el.closest('.nav-group')),
     'logout': async () => {
         if (hasUnsavedWork() && !confirm('Tienes cambios sin guardar. ¿Cerrar sesión de todos modos?')) return;
         discardDrafts();
@@ -2380,6 +2845,19 @@ const ACTIONS = {
         } catch (e) { toast(e.message, 'error'); el.disabled = false; }
     },
     'ver-entregas': (el) => verEntregas(el.dataset.id),
+    'agenda-nav': (el) => { agendaNav(Number(el.dataset.dir)); render(); },
+    'agenda-ir': (el) => { Object.assign(agenda(), { modo: 'dia', fecha: el.dataset.fecha }); render(); },
+    'new-evento': (el) => openEventoModal(null, { fecha: el.dataset.fecha || '', hora: el.dataset.hora || '' }),
+    'ver-evento': (el) => verEvento(el.dataset.tipo, el.dataset.id),
+    'delete-evento': async (el) => {
+        const e = state.db.eventos.find(x => x.EventoID === el.dataset.id);
+        await openModal({
+            title: `Eliminar "${e?.Titulo || 'evento'}"`, danger: true, submitLabel: 'Eliminar',
+            body: '<p>El evento desaparecerá de la agenda de todos. Queda registro en la bitácora.</p>',
+            onSubmit: async () => { await withBusy(() => api('deleteEvento', { EventoID: el.dataset.id })); toast('Evento eliminado.', 'success'); await refresh(); },
+        });
+    },
+
     'nota-aprobacion': async (el) => {
         const c = idx.cursos.get(el.dataset.curso);
         await openModal({
@@ -2494,6 +2972,9 @@ const CHANGES = {
         const box = el.form.querySelector('[data-pct]');
         if (box) box.hidden = el.value !== 'PORCENTAJE';
     },
+    'agenda-modo': (el) => { agenda().modo = el.value; render(); },
+    'agenda-entregas': (el) => { agenda().entregas = el.checked; render(); },
+    'evento-todo': (el) => { el.form.querySelectorAll('[data-horas]').forEach(x => { x.hidden = el.checked; }); },
     'noticia-alcance': (el) => {
         const box = el.form.querySelector('[data-cursos]');
         if (box) box.hidden = el.value !== 'CURSOS';
@@ -2609,6 +3090,12 @@ function passwordProblem(pw) {
     if (/^(.)\1+$/.test(pw) || /1234567|abcdefg|qwerty|password|contrase/i.test(pw)) return 'Esa contraseña es demasiado fácil de adivinar.';
     return '';
 }
+
+// Al pasar de celular a escritorio (o al revés) el menú toma el estado que corresponde.
+matchMedia('(min-width: 961px)').addEventListener('change', () => {
+    $('#screen-app').classList.remove('sidebar-open');
+    if (state.me) aplicarMenuOculto();
+});
 
 document.addEventListener('click', (ev) => {
     const el = ev.target.closest('[data-action]');

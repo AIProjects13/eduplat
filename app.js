@@ -90,6 +90,7 @@ const emptyDb = () => ({
     entregas: [], asistencia: [], auditoria: [], bitacora: [],
     noticias: [], lecturas: [], anotaciones: [], eventos: [],
     conversaciones: [], restricciones: [], contactosAdmin: [], materiales: [],
+    resumenes: [], fechasAsistencia: {}, parcial: {},
 });
 
 const state = {
@@ -142,6 +143,7 @@ function buildIndex() {
 
     idx = {
         users,
+        resumen: new Map(db.resumenes.map(r => [`${r.EstudianteID}|${r.CursoID}`, r])),
         materialesByCurso: groupBy(materiales.filter(m => !m.ItemID), 'CursoID'),
         adjuntosByItem: groupBy(materiales.filter(m => m.ItemID), 'ItemID'),
         cursos: new Map(db.cursos.map(c => [c.CursoID, c])),
@@ -381,8 +383,57 @@ async function loadSnapshot(opts) {
     const data = await api('getSnapshot', {}, opts);
     state.me = data.me;
     state.db = { ...emptyDb(), ...data };
+    state.cargado = new Set();      // datos pedidos aparte (se vuelven a pedir tras cada recarga)
+    state.ultimaCarga = Date.now();
     buildIndex();
 }
+
+// --------------------------------------------------------------------------
+// Datos a pedido: lo pesado (notas de un curso, ficha de un alumno, asistencia de un
+// día, auditoría) se pide al abrir la pantalla que lo usa y se suma a state.db.
+// --------------------------------------------------------------------------
+
+const CLAVES_DB = {
+    entregas: 'EntregaID', items: 'ItemID', unidades: 'UnidadID', cursos: 'CursoID', inscripciones: 'InscripcionID',
+    asistencia: 'AsistenciaID', auditoria: 'AuditoriaID', bitacora: 'BitacoraID', materiales: 'MaterialID',
+};
+
+function sumarDatos(parcial) {
+    for (const [tabla, clave] of Object.entries(CLAVES_DB)) {
+        if (!Array.isArray(parcial?.[tabla])) continue;
+        const mapa = new Map(state.db[tabla].map(r => [r[clave], r]));
+        parcial[tabla].forEach(r => mapa.set(r[clave], r));
+        state.db[tabla] = [...mapa.values()];
+    }
+    buildIndex();
+}
+
+const enCurso = new Map();
+/** true si ya está cargado; si no, lo pide (una sola vez) y vuelve a dibujar al llegar. */
+function necesita(clave, pedir) {
+    if (state.cargado?.has(clave)) return true;
+    if (!enCurso.has(clave)) {
+        const carga = state.ultimaCarga;
+        enCurso.set(clave, withBusy(pedir)
+            .then(d => { if (carga === state.ultimaCarga) { sumarDatos(d); state.cargado.add(clave); } })
+            .catch(e => { state.cargado?.add(clave); toast(e.message, 'error'); })
+            .finally(() => { enCurso.delete(clave); if (state.me && !$('#modal').open) render(); }));
+    }
+    return false;
+}
+
+/** ¿Están en memoria las notas detalladas de este alumno en este curso? */
+function notasCargadas(estId, cursoId) {
+    if (!esStaff()) return true;                                     // alumno y padre: siempre
+    if (!isAdmin() && canManage(cursoId)) return true;               // maestro: sus cursos
+    return !!(state.cargado?.has(`curso:${cursoId}`) || state.cargado?.has(`est:${estId}`));
+}
+
+/** El admin pide las notas de un curso al abrirlo. */
+const cursoListo = (cursoId) => !isAdmin() || necesita(`curso:${cursoId}`, () => api('getCursoDatos', { CursoID: cursoId }));
+/** Ficha completa de un alumno (para admin y maestros). */
+const alumnoListo = (estId) => !esStaff() || necesita(`est:${estId}`, () => api('getEstudianteDatos', { EstudianteID: estId }));
+const cargando = (texto = 'Cargando…') => `<section class="card"><p class="muted center" style="padding:28px">${ico('loader', 'spin')} ${esc(texto)}</p></section>`;
 
 /** Ejecuta una operación mostrando la barra de progreso. */
 async function withBusy(fn) {
@@ -407,26 +458,85 @@ async function refresh() {
 // campo en edición: espera a que termine.
 // --------------------------------------------------------------------------
 
-const senal = { unsub: null, pendiente: false, timer: null };
+const senal = { unsub: [], pendiente: false, timer: null, ult: {} };
+const RECARGA_PERSONAL_MS = 20 * 60 * 1000;
 
+/**
+ * Señales: "T" = cambiaron datos que te tocan; "TM" = mensajes.
+ * - Alumnos y padres: los datos se recargan al instante (son pocos).
+ * - Maestros y admin: se marca "hay cambios" y se recarga cada 20 minutos (o con Actualizar).
+ * - Mensajes: para todos, al instante (solo la lista de conversaciones, que es liviana).
+ */
 function escucharCambios() {
     dejarDeEscuchar();
     if (!auth.currentUser) return;
-    let primera = true;
-    senal.unsub = onSnapshot(doc(firestore, 'senales', auth.currentUser.uid), (snap) => {
-        if (primera) { primera = false; return; }          // estado inicial: los datos ya están cargados
-        const d = snap.data();
-        if (!d) return;
-        // Cambio hecho desde esta misma pestaña: ya se recargó al guardar.
-        if (d.Propio && Date.now() - (state.ultimaEscritura || 0) < 15000) return;
-        senal.pendiente = true;
-        programarRecarga(600);
-    }, (e) => console.warn('[Plataforma] Sin actualización en tiempo real:', e.code || e));
+    const docs = [doc(firestore, 'senales', auth.currentUser.uid)];
+    if (isAdmin()) docs.push(doc(firestore, 'senales', '_admin'));
+    docs.forEach((ref) => {
+        let primera = true;
+        senal.unsub.push(onSnapshot(ref, (snap) => {
+            const d = snap.data() || {};
+            const prev = senal.ult[ref.id] || {};
+            senal.ult[ref.id] = { T: d.T || 0, TM: d.TM || 0 };
+            if (primera) { primera = false; return; }      // estado inicial: los datos ya están cargados
+            if ((d.TM || 0) > (prev.TM || 0)) actualizarMensajes();
+            if ((d.T || 0) > (prev.T || 0)) {
+                // Cambio hecho desde esta misma pestaña: ya se recargó al guardar.
+                if (d.Propio && Date.now() - (state.ultimaEscritura || 0) < 15000) return;
+                senal.pendiente = true;
+                if (esStaff()) marcarPendiente(); else programarRecarga(600);
+            }
+        }, (e) => console.warn('[Plataforma] Sin actualización en tiempo real:', e.code || e)));
+    });
+}
+
+/** Maestros y admin: aviso discreto en "Actualizar" de que hay datos nuevos. */
+function marcarPendiente() {
+    $('[data-action="sync"]')?.classList.toggle('has-news', senal.pendiente);
+}
+
+// Cada 20 minutos: si hubo cambios, el personal recarga (sin interrumpir lo que esté haciendo).
+setInterval(() => {
+    if (!state.me || !esStaff() || !senal.pendiente) return;
+    if (Date.now() - (state.ultimaCarga || 0) < RECARGA_PERSONAL_MS - 5000) return;
+    programarRecarga(0);
+}, 60 * 1000);
+
+let mensajesEnCurso = false;
+/** Mensajes nuevos: solo se pide la lista de conversaciones (y se repinta si estás en Mensajes). */
+async function actualizarMensajes() {
+    if (mensajesEnCurso || !state.me) return;
+    mensajesEnCurso = true;
+    try {
+        const r = await api('getConversaciones');
+        Object.assign(state.db, { conversaciones: r.conversaciones, restricciones: r.restricciones, contactosAdmin: r.contactosAdmin });
+        buildIndex();
+        actualizarInsignia();
+        if (state.route.view === 'mensajes' && !$('#modal').open) repintarConservando();
+    } catch (e) {
+        console.warn('[Plataforma] No se pudieron actualizar los mensajes:', e.message);
+    } finally {
+        mensajesEnCurso = false;
+    }
+}
+
+/** Vuelve a dibujar la vista conservando lo escrito en el chat y la posición. */
+function repintarConservando() {
+    const y = window.scrollY;
+    const borrador = $('.chat-compose textarea');
+    const texto = borrador?.value || '', conFoco = borrador && document.activeElement === borrador;
+    renderChrome();
+    render();
+    window.scrollTo(0, y);
+    const nuevo = $('.chat-compose textarea');
+    if (nuevo && texto) nuevo.value = texto;
+    if (nuevo && conFoco) nuevo.focus();
 }
 
 function dejarDeEscuchar() {
-    senal.unsub?.();
-    senal.unsub = null;
+    senal.unsub.forEach(u => u());
+    senal.unsub = [];
+    senal.ult = {};
     senal.pendiente = false;
     clearTimeout(senal.timer);
 }
@@ -447,24 +557,18 @@ async function recargarSiSePuede() {
     if (!senal.pendiente || !state.me || $('#screen-app').hidden) return;
     if (ocupado()) return programarRecarga(2500);
     senal.pendiente = false;
-    const y = window.scrollY;
     try {
         await withBusy(loadSnapshot);
         if (ocupado()) { senal.pendiente = true; return programarRecarga(2500); }   // empezó a escribir mientras cargaba
-        const borrador = $('.chat-compose textarea');
-        const texto = borrador?.value || '', conFoco = borrador && document.activeElement === borrador;
-        renderChrome();
-        render();
-        window.scrollTo(0, y);
-        const nuevo = $('.chat-compose textarea');
-        if (nuevo && texto) nuevo.value = texto;
-        if (nuevo && conFoco) nuevo.focus();
+        marcarPendiente();
+        repintarConservando();
     } catch (e) {
         if (!(e instanceof ApiError)) console.error('[Plataforma] Error al actualizar:', e);
     }
 }
 
-document.addEventListener('visibilitychange', () => { if (!document.hidden && senal.pendiente) programarRecarga(300); });
+// Alumnos y padres: al volver a la pestaña se aplica lo pendiente. El personal espera su turno de 20 minutos.
+document.addEventListener('visibilitychange', () => { if (!document.hidden && senal.pendiente && state.me && !esStaff()) programarRecarga(300); });
 
 /** Guarda con el servidor y recarga los datos. Devuelve true si todo salió bien. */
 async function mutate(action, payload, successMsg) {
@@ -534,7 +638,22 @@ const Grades = {
     },
 
     forStudent(estId, cursoId) {
-        return this.course(cursoId, itemId => notaEfectivaDe(estId, itemId));
+        if (notasCargadas(estId, cursoId)) return this.course(cursoId, itemId => notaEfectivaDe(estId, itemId));
+        return this.desdeResumen(estId, cursoId);
+    },
+
+    /** Mismo resultado que course(), pero desde el resumen guardado del curso (sin leer cada nota). */
+    desdeResumen(estId, cursoId) {
+        const r = idx.resumen.get(`${estId}|${cursoId}`)?.N;
+        const base = this.units(cursoId);
+        const nums = [...new Set([...base.map(u => u.numero), ...Object.keys(r?.U || {}).map(Number)])].sort((a, b) => a - b);
+        const units = nums.map(n => {
+            const u = base.find(x => x.numero === n) || { numero: n, id: null, nombre: `Unidad ${n}`, peso: 0, definida: false, items: [] };
+            const [promedio = null, pesoEvaluado = 0, pesoTotal = 0] = r?.U?.[n] || [];
+            return { ...u, promedio, pesoEvaluado, pesoTotal,
+                acumulado: pesoTotal > 0 && pesoEvaluado > 0 && promedio != null ? promedio * pesoEvaluado / pesoTotal : null };
+        });
+        return { units, final: r ? r.F ?? null : null, resumen: true };
     },
 
     general(estId) {
@@ -542,12 +661,21 @@ const Grades = {
     },
 };
 
+/** Conteos desde el resumen de cada curso; "rows" son los registros que hay en memoria (ausencias, tardanzas, justificadas). */
 function attendanceStats(estId, cursoId = null) {
-    const rows = state.db.asistencia.filter(a => a.EstudianteID === estId && (!cursoId || a.CursoID === cursoId));
+    const rows = state.db.asistencia.filter(a => a.EstudianteID === estId && (!cursoId || a.CursoID === cursoId) && a.Estado !== 'Presente');
     const c = { Presente: 0, Tarde: 0, Ausente: 0, Justificado: 0 };
-    rows.forEach(r => { if (r.Estado in c) c[r.Estado]++; });
+    state.db.resumenes.filter(r => r.EstudianteID === estId && (!cursoId || r.CursoID === cursoId))
+        .forEach(r => Object.keys(c).forEach(k => { c[k] += Number(r.A?.[k] || 0); }));
+    const total = c.Presente + c.Tarde + c.Ausente + c.Justificado;
     const base = c.Presente + c.Tarde + c.Ausente;
-    return { ...c, total: rows.length, pct: base ? ((c.Presente + c.Tarde) / base) * 100 : null, rows };
+    return { ...c, total, pct: base ? ((c.Presente + c.Tarde) / base) * 100 : null, rows };
+}
+
+/** Entregas esperando nota en los cursos que gestiona (el admin: desde los resúmenes). */
+function porCalificarTotal(cursoIds) {
+    const ids = new Set(cursoIds);
+    return state.db.resumenes.filter(r => ids.has(r.CursoID)).reduce((s, r) => s + Number(r.N?.PorCal || 0), 0);
 }
 
 // ==========================================================================
@@ -725,17 +853,17 @@ function viewTutorDashboard() {
     const est = admin ? students() : [...new Set(cursos.flatMap(c => alumnosDe(c.CursoID).map(a => a.ID)))];
     const padres = db.users.filter(u => u.Rol === ROLES.PADRE);
     const tutores = db.users.filter(u => u.Rol === ROLES.TUTOR);
+    // El maestro tiene sus entregas en memoria; el admin usa los resúmenes de cada curso.
     const porCalificar = db.entregas
         .filter(e => e.Estado === 'Entregado' && toNum(e.Nota) == null && propios.has(idx.items.get(e.ItemID)?.CursoID))
         .sort((a, b) => String(b.Fecha).localeCompare(String(a.Fecha)));
-    const asistRows = db.asistencia.filter(a => propios.has(a.CursoID));
-    const asist = (() => {
-        const c = { p: 0, b: 0 };
-        asistRows.forEach(a => {
-            if (a.Estado === 'Presente' || a.Estado === 'Tarde') { c.p++; c.b++; } else if (a.Estado === 'Ausente') c.b++;
-        });
-        return c.b ? (c.p / c.b) * 100 : null;
-    })();
+    const nPorCalificar = admin ? porCalificarTotal([...propios]) : porCalificar.length;
+    const asistTot = db.resumenes.filter(r => propios.has(r.CursoID)).reduce((t, r) => {
+        const a = r.A || {};
+        t.p += (+a.Presente || 0) + (+a.Tarde || 0); t.b += (+a.Presente || 0) + (+a.Tarde || 0) + (+a.Ausente || 0); t.n += (+a.Presente || 0) + (+a.Tarde || 0) + (+a.Ausente || 0) + (+a.Justificado || 0);
+        return t;
+    }, { p: 0, b: 0, n: 0 });
+    const asist = asistTot.b ? (asistTot.p / asistTot.b) * 100 : null;
     const nItems = cursos.reduce((s, c) => s + (idx.itemsByCurso.get(c.CursoID) || []).length, 0);
 
     const filasCursos = cursos.map(c => {
@@ -775,8 +903,8 @@ function viewTutorDashboard() {
     <div class="grid grid-kpi">
         ${kpi(admin ? 'Estudiantes' : 'Mis estudiantes', est.length, admin ? `${padres.length} padres · ${tutores.length} tutores` : '', 'graduation-cap')}
         ${kpi(admin ? 'Cursos activos' : 'Mis cursos', cursos.length, `${nItems} evaluaciones`, 'book-open')}
-        ${kpi('Por calificar', porCalificar.length, 'Entregas sin nota', 'inbox', porCalificar.length ? 'grade ok' : '')}
-        ${kpi(admin ? 'Asistencia global' : 'Asistencia en mis cursos', asist == null ? '—' : `${fmtNota(asist)}%`, `${asistRows.length} registros`, 'calendar-check')}
+        ${kpi('Por calificar', nPorCalificar, 'Entregas sin nota', 'inbox', nPorCalificar ? 'grade ok' : '')}
+        ${kpi(admin ? 'Asistencia global' : 'Asistencia en mis cursos', asist == null ? '—' : `${fmtNota(asist)}%`, `${asistTot.n} registros`, 'calendar-check')}
     </div>
 
     <section class="card">
@@ -790,7 +918,8 @@ function viewTutorDashboard() {
 
     <section class="card">
         <div class="card-head"><h2>Entregas por calificar</h2>${porCalificar.length > 8 ? `<span class="badge">+${porCalificar.length - 8} más</span>` : ''}</div>
-        ${porCalificar.length ? `<ul class="item-list">${filasPend}</ul>` : emptyState('No hay entregas pendientes. ¡Todo al día!', 'circle-check')}
+        ${admin ? (nPorCalificar ? `<p class="card-body muted">${nPorCalificar} entrega(s) esperan nota en todo el colegio. Abre un curso para ver el detalle.</p>` : emptyState('No hay entregas pendientes. ¡Todo al día!', 'circle-check'))
+            : porCalificar.length ? `<ul class="item-list">${filasPend}</ul>` : emptyState('No hay entregas pendientes. ¡Todo al día!', 'circle-check')}
     </section>`;
 }
 
@@ -1024,6 +1153,7 @@ async function openCourseModal(c = null) {
 function viewCursoDetalle(cursoId) {
     const c = idx.cursos.get(cursoId);
     if (!c) return `<section class="card">${emptyState('El curso no existe.', 'search', '<a class="btn btn-ghost" href="#/cursos">Volver a cursos</a>')}</section>`;
+    if (!cursoListo(c.CursoID)) return cargando('Cargando el curso…');
     const tabs = [['evaluaciones', 'Evaluaciones'], ['material', 'Material de apoyo'], ['resultados', 'Resultados'], ['unidades', 'Unidades y ponderación'], ['pensum', 'Pensum'], ['estudiantes', 'Estudiantes']];
     const tab = state.cursoTab;
     const m = canManage(c.CursoID);
@@ -1317,6 +1447,7 @@ function viewCalificaciones() {
     if (!cursos.length) return `<section class="card">${emptyState(isAdmin() ? 'Primero crea un curso.' : 'Aún no tienes cursos asignados.', 'book-open')}</section>`;
     if (!cursos.some(c => c.CursoID === state.gb.cursoId)) state.gb.cursoId = cursos[0].CursoID;
     const cursoId = state.gb.cursoId;
+    if (!cursoListo(cursoId)) return cargando('Cargando las notas del curso…');
     const units = Grades.units(cursoId);
     if (state.gb.unidad !== 'all' && !units.some(u => String(u.numero) === String(state.gb.unidad))) state.gb.unidad = 'all';
 
@@ -1486,10 +1617,13 @@ function viewAsistencia() {
     if (!cursos.length) return `<section class="card">${emptyState(isAdmin() ? 'Primero crea un curso.' : 'Aún no tienes cursos asignados.', 'book-open')}</section>`;
     if (!cursos.some(c => c.CursoID === state.att.cursoId)) state.att.cursoId = cursos[0].CursoID;
     const { cursoId, fecha } = state.att;
+    if (!necesita(`asis:${cursoId}|${fecha}`, async () => ({ asistencia: (await api('getAsistencia', { CursoID: cursoId, Fecha: fecha })).registros }))) {
+        return cargando('Cargando la asistencia del día…');
+    }
     const alumnos = alumnosDe(cursoId);
     const existentes = new Map(state.db.asistencia
         .filter(a => a.CursoID === cursoId && a.Fecha === fecha).map(a => [a.EstudianteID, a]));
-    const fechas = [...new Set(state.db.asistencia.filter(a => a.CursoID === cursoId).map(a => a.Fecha))].sort().reverse();
+    const fechas = state.db.fechasAsistencia?.[cursoId] || [];
 
     const lista = alumnos.map(a => {
         const prev = existentes.get(a.ID)?.Estado || '';
@@ -1559,6 +1693,11 @@ async function attSave() {
 function viewAuditoria() {
     const est = students();
     const f = state.auditEst;
+    const limite = state.auditLimite || 300;
+    const listo = f === 'ALL'
+        ? necesita(`auditoria:${limite}`, () => api('getAuditoria', { limite }))
+        : alumnoListo(f);
+    if (!listo) return cargando('Cargando la auditoría…');
     const match = r => f === 'ALL' || r.EstudianteID === f;
     const notas = state.db.auditoria.filter(match).sort((a, b) => String(b.Fecha).localeCompare(String(a.Fecha)));
     const bit = state.db.bitacora.filter(match).sort((a, b) => String(b.Fecha).localeCompare(String(a.Fecha)));
@@ -1571,11 +1710,12 @@ function viewAuditoria() {
         ${isAdmin() ? `<button class="btn btn-ghost" data-action="verify-audit">${ico('shield-check')} Verificar integridad</button>` : ''}
     </div>
     <div id="audit-check">${state.auditCheck ? auditCheckHtml(state.auditCheck) : ''}</div>
+    ${f === 'ALL' && (notas.length >= limite || bit.length >= limite) && limite < 500 ? `<p class="muted" style="font-size:13px">Se muestran los ${limite} registros más recientes. <button class="btn btn-link" data-action="audit-mas">Ver más</button></p>` : ''}
     <section class="card">
         <div class="card-head"><h2>Cambios de notas</h2><span class="badge">${notas.length}</span></div>
         ${notas.length ? `<div class="table-wrap"><table class="table">
             <thead><tr><th>Fecha</th><th>Estudiante</th><th>Curso / Evaluación</th><th class="center">Antes → Ahora</th><th>Justificación</th><th>Por</th></tr></thead>
-            <tbody>${notas.slice(0, 300).map(r => `<tr>
+            <tbody>${notas.slice(0, limite).map(r => `<tr>
                 <td>${fmtDateTime(r.Fecha)}</td><td>${name(r.EstudianteID)}</td>
                 <td>${esc(idx.cursos.get(r.CursoID)?.NombreCurso || r.CursoID)}<br><small class="muted">${esc(idx.items.get(r.ItemID)?.Titulo || r.ItemID)}</small></td>
                 <td class="center">${gradePill(toNum(r.NotaAnterior))} → ${gradePill(toNum(r.NotaNueva))}</td>
@@ -1586,7 +1726,7 @@ function viewAuditoria() {
         <div class="card-head"><h2>Bitácora de datos</h2><span class="badge">${bit.length}</span></div>
         ${bit.length ? `<div class="table-wrap"><table class="table">
             <thead><tr><th>Fecha</th><th>Estudiante</th><th>Acción</th><th>Detalle</th><th>Justificación</th><th>Por</th></tr></thead>
-            <tbody>${bit.slice(0, 300).map(r => `<tr>
+            <tbody>${bit.slice(0, limite).map(r => `<tr>
                 <td>${fmtDateTime(r.Fecha)}</td><td>${name(r.EstudianteID)}</td>
                 <td><span class="badge">${esc(r.Entidad)} · ${esc(r.Accion)}</span></td>
                 <td class="wrap">${esc(r.Detalle)}</td><td class="wrap">${esc(r.Justificacion)}</td><td><small>${esc(r.ModificadoPor)}</small></td></tr>`).join('')}</tbody></table></div>`
@@ -1613,6 +1753,7 @@ function auditCheckHtml(r) {
 function viewTutorStudent(estId) {
     const u = idx.users.get(estId);
     if (!u || u.Rol !== ROLES.ESTUDIANTE) return `<section class="card">${emptyState('Estudiante no encontrado.', 'search', '<a class="btn btn-ghost" href="#/usuarios">Volver</a>')}</section>`;
+    if (!alumnoListo(estId)) return cargando('Cargando la ficha del alumno…');
     const padres = state.db.users.filter(p => p.Rol === ROLES.PADRE && String(p.HijosIDs || '').split(',').includes(estId));
     const botones = [
         puedoEscribirA(u) ? `<button class="btn btn-primary btn-sm" data-action="nuevo-mensaje" data-para="${esc(u.ID)}">${ico('message-square')} Mensaje al alumno</button>` : '',
@@ -1753,6 +1894,7 @@ function viewStudentAsistencia() {
 }
 
 function attendanceSection(estId, full = false) {
+    if (!alumnoListo(estId)) return cargando('Cargando asistencia…');
     const s = attendanceStats(estId);
     const rows = [...s.rows].sort((a, b) => String(b.Fecha).localeCompare(String(a.Fecha)));
     const color = { Presente: 'badge-success', Tarde: 'badge-warn', Ausente: 'badge-danger', Justificado: 'badge-info' };
@@ -1763,12 +1905,12 @@ function attendanceSection(estId, full = false) {
         ${kpi('Presente', s.Presente)}${kpi('Tarde', s.Tarde)}${kpi('Ausente', s.Ausente)}${kpi('Justificado', s.Justificado)}
     </div>` : ''}
     <section class="card">
-        <div class="card-head"><h2>Historial de asistencia</h2>${!full && s.pct != null ? `<span class="grade-pill ${gradeClass(s.pct)}">${fmtNota(s.pct)}%</span>` : ''}</div>
+        <div class="card-head"><div><h2>Historial de asistencia</h2><small class="muted">Ausencias, llegadas tarde y justificadas · ${s.Presente} día(s) presente</small></div>${!full && s.pct != null ? `<span class="grade-pill ${gradeClass(s.pct)}">${fmtNota(s.pct)}%</span>` : ''}</div>
         ${rows.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>Fecha</th><th>Curso</th><th>Estado</th></tr></thead>
         <tbody>${shown.map(r => `<tr><td>${fmtDate(r.Fecha)}</td><td>${esc(idx.cursos.get(r.CursoID)?.NombreCurso || '—')}</td>
             <td><span class="badge ${color[r.Estado] || ''}">${esc(r.Estado)}</span></td></tr>`).join('')}</tbody></table></div>
-        ${rows.length > shown.length ? `<p class="muted card-body">Mostrando las últimas ${shown.length} de ${rows.length} sesiones.</p>` : ''}`
-        : emptyState('Aún no hay asistencia registrada.', 'calendar-check')}
+        ${rows.length > shown.length ? `<p class="muted card-body">Mostrando las últimas ${shown.length} de ${rows.length}.</p>` : ''}`
+        : emptyState(s.total ? `Sin ausencias ni llegadas tarde: ${s.Presente} día(s) presente.` : 'Aún no hay asistencia registrada.', 'calendar-check')}
     </section>`;
 }
 
@@ -1794,7 +1936,9 @@ function progressView(estId, { showAudit = false } = {}) {
     const estados = cursosDe(estId).map(c => estadoFinal(Grades.forStudent(estId, c.CursoID).final, c));
     const nAprob = estados.filter(e => e === 'aprobado').length, nRepr = estados.filter(e => e === 'reprobado').length;
     const asist = attendanceStats(estId);
-    const calificadas = state.db.entregas.filter(e => e.EstudianteID === estId && toNum(e.Nota) != null).length;
+    const calificadas = cursosDe(estId).every(c => notasCargadas(estId, c.CursoID))
+        ? state.db.entregas.filter(e => e.EstudianteID === estId && toNum(e.Nota) != null).length
+        : state.db.resumenes.filter(r => r.EstudianteID === estId).reduce((n, r) => n + Number(r.N?.Cal || 0), 0);
 
     const cursoCards = cursos.map(c => {
         const res = Grades.forStudent(estId, c.CursoID);
@@ -1969,10 +2113,11 @@ function atencionItems() {
     }
     if (esStaff()) {
         const propios = new Set(cursosGestionables().map(c => c.CursoID));
-        const porCalificar = state.db.entregas.filter(e => toNum(e.Nota) == null && (e.TieneArchivo || e.RecibidoEn) && propios.has(idx.items.get(e.ItemID)?.CursoID)).length;
+        const porCalificar = isAdmin() ? porCalificarTotal([...propios])
+            : state.db.entregas.filter(e => toNum(e.Nota) == null && (e.TieneArchivo || e.RecibidoEn) && propios.has(idx.items.get(e.ItemID)?.CursoID)).length;
         if (porCalificar) out.push(itemAtencion('<span class="badge badge-warn">Por calificar</span>', `${porCalificar} entrega(s) esperan nota`, '',
             `<a class="btn btn-primary btn-sm" href="#/calificaciones">Calificar</a>`));
-        cursosGestionables().flatMap(c => idx.itemsByCurso.get(c.CursoID) || []).forEach(i => {
+        cursosGestionables().filter(c => !isAdmin() || state.cargado?.has(`curso:${c.CursoID}`)).flatMap(c => idx.itemsByCurso.get(c.CursoID) || []).forEach(i => {
             if (!i.FechaEntrega || i.FechaEntrega >= today()) return;
             const t = tasaEntrega(i);
             if (t.total && t.n < t.total) out.push(itemAtencion(tipoBadge(i.Tipo), `${esc(i.Titulo)}: faltan ${t.total - t.n} entrega(s)`,
@@ -3315,10 +3460,11 @@ const ACTIONS = {
         discardDrafts();
         await signOut(auth);
     },
+    'audit-mas': () => { state.auditLimite = 500; render(); },
     'sync': async () => {
         if (hasUnsavedWork() && !confirm('Recargar descartará los cambios sin guardar. ¿Continuar?')) return;
         discardDrafts();
-        try { await refresh(); toast('Datos actualizados.'); } catch (e) { toast(e.message, 'error'); }
+        try { await refresh(); senal.pendiente = false; marcarPendiente(); toast('Datos actualizados.'); } catch (e) { toast(e.message, 'error'); }
     },
     'forgot-password': async () => {
         const email = $('#login-form [name=email]').value.trim();

@@ -861,6 +861,22 @@ details.more[open] > summary::before { content: "▾ "; }
 .cita-respuesta { margin: 12px 0; padding: 12px 14px; border-radius: 14px; background: var(--surface-2); }
 .cita-respuesta p { margin: 0 0 8px; }
 
+/* ------------------------------ Lecturas PDF ------------------------------ */
+
+.bar.lec span { background: var(--grad-secondary); }
+.bar.lec.is-full span { background: var(--good); }
+.mat-icon.is-lectura { background: var(--primary-50); color: var(--primary); }
+.lec-avance { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; max-width: 360px; }
+.pdf-visor { display: flex; flex-direction: column; gap: 10px; }
+.pdf-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; position: sticky; top: 0; z-index: 2; padding: 6px; border-radius: 12px; background: var(--surface-2); }
+.pdf-toolbar .spacer { flex: 1; }
+.pdf-toolbar .icon-btn { font-size: 18px; font-weight: 700; }
+.pdf-pagina { font-size: 14px; font-weight: 700; color: var(--text-2); min-width: 120px; text-align: center; }
+.pdf-avance { display: flex; flex-direction: column; gap: 4px; }
+.pdf-hoja { display: flex; justify-content: center; overflow: auto; max-height: 68vh; padding: 8px; border-radius: 12px; background: #E9EEF4; overscroll-behavior: contain; }
+.pdf-hoja canvas { background: #fff; box-shadow: 0 4px 18px -6px rgba(10, 31, 68, .35); border-radius: 4px; }
+.pdf-nota { font-size: 12.5px; margin: 0; }
+
 /* ------------------------------ Buscador para elegir personas ------------------------------ */
 
 .picker { display: flex; flex-direction: column; gap: 8px; }

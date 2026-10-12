@@ -90,7 +90,7 @@ const emptyDb = () => ({
     entregas: [], asistencia: [], auditoria: [], bitacora: [],
     noticias: [], lecturas: [], anotaciones: [], eventos: [],
     conversaciones: [], restricciones: [], contactosAdmin: [], materiales: [],
-    resumenes: [], fechasAsistencia: {}, parcial: {},
+    resumenes: [], fechasAsistencia: {}, parcial: {}, avances: [],
 });
 
 const state = {
@@ -144,6 +144,7 @@ function buildIndex() {
     idx = {
         users,
         resumen: new Map(db.resumenes.map(r => [`${r.EstudianteID}|${r.CursoID}`, r])),
+        avance: new Map(db.avances.map(a => [`${a.MaterialID}|${a.EstudianteID}`, a])),
         materialesByCurso: groupBy(materiales.filter(m => !m.ItemID), 'CursoID'),
         adjuntosByItem: groupBy(materiales.filter(m => m.ItemID), 'ItemID'),
         cursos: new Map(db.cursos.map(c => [c.CursoID, c])),
@@ -396,6 +397,7 @@ async function loadSnapshot(opts) {
 const CLAVES_DB = {
     entregas: 'EntregaID', items: 'ItemID', unidades: 'UnidadID', cursos: 'CursoID', inscripciones: 'InscripcionID',
     asistencia: 'AsistenciaID', auditoria: 'AuditoriaID', bitacora: 'BitacoraID', materiales: 'MaterialID',
+    avances: 'AvanceID',
 };
 
 function sumarDatos(parcial) {
@@ -1954,7 +1956,7 @@ function progressView(estId, { showAudit = false } = {}) {
                 <ul class="item-list">${res.units.flatMap(un => un.items).map(i => studentItemRow(i, estId)).join('')}</ul>
             </details>` : emptyState('Sin evaluaciones todavía.', 'clipboard-list')}
             ${(idx.materialesByCurso.get(c.CursoID) || []).length ? `<details class="more"><summary>Material de apoyo (${idx.materialesByCurso.get(c.CursoID).length})</summary>
-                ${materialLista(c.CursoID, null, false)}</details>` : ''}
+                ${materialLista(c.CursoID, null, false, false, estId)}</details>` : ''}
         </section>`;
     }).join('');
 
@@ -2101,6 +2103,12 @@ function atencionItems() {
         }));
     }
     if (rol === ROLES.ESTUDIANTE) {
+        state.db.materiales.filter(m => m.Lectura && !idx.avance.get(`${m.MaterialID}|${state.me.ID}`)?.Completa).forEach(m => {
+            const a = idx.avance.get(`${m.MaterialID}|${state.me.ID}`);
+            out.push(itemAtencion(`<span class="badge badge-brand">${ico('book-open')}Lectura</span>`, esc(m.Titulo),
+                `<span>${esc(idx.cursos.get(m.CursoID)?.NombreCurso || '')}</span><span>${a ? `${a.Vistas.length} de ${a.Total} páginas` : 'Sin empezar'}</span>`,
+                `<button class="btn btn-primary btn-sm" data-action="leer-pdf" data-id="${esc(m.MaterialID)}">${a ? 'Continuar' : 'Leer'}</button>`));
+        });
         cursosDe(state.me.ID).flatMap(c => idx.itemsByCurso.get(c.CursoID) || []).forEach(i => {
             const ent = idx.entregas.get(`${state.me.ID}|${i.ItemID}`);
             if (!TIPOS_CON_ENTREGA.includes(i.Tipo) || toNum(ent?.Nota) != null || ent?.HechaEn || entregada(ent)) return;
@@ -3190,17 +3198,203 @@ function adjuntosHtml(item, gestiona) {
 }
 
 /** Lista de material de un curso. unidad: número, 0 = general, null = todo. */
-function materialLista(cursoId, unidad, gestiona, compacto = false) {
+function materialLista(cursoId, unidad, gestiona, compacto = false, estId = null) {
     const lista = (idx.materialesByCurso.get(cursoId) || []).filter(m => unidad == null || +m.Unidad === +unidad);
     if (!lista.length) return '';
+    const alumno = estId || (state.me.Rol === ROLES.ESTUDIANTE ? state.me.ID : null);
     const titulo = compacto ? `<h4 class="mat-title">${ico('folder-open', 'icon-sm')} ${unidad === 0 ? 'Material general del curso' : 'Material de apoyo'}</h4>` : '';
     return `${titulo}<ul class="item-list mat-list">${lista.map(m => `<li class="item-row">
-        <span class="mat-icon">${ico(m.Tipo === 'ENLACE' ? 'arrow-up-right' : 'paperclip')}</span>
+        <span class="mat-icon${m.Lectura ? ' is-lectura' : ''}">${ico(m.Lectura ? 'book-open' : m.Tipo === 'ENLACE' ? 'arrow-up-right' : 'paperclip')}</span>
         <div class="item-main"><strong>${esc(m.Titulo)}</strong>
-            <div class="item-meta">${m.Descripcion ? `<span>${esc(m.Descripcion)}</span>` : ''}<span>${m.Tipo === 'ENLACE' ? esc(dominio(m.URL)) : `${esc(m.ArchivoNombre)} · ${tamano(m.Tamano || 0)}`}</span>${!compacto ? `<span>${esc(m.AutorNombre)} · ${fmtDate(m.Fecha)}</span>` : ''}</div></div>
-        <div class="item-side">${materialLink(m)}${gestiona ? `<button class="icon-btn danger" data-action="delete-material" data-id="${esc(m.MaterialID)}" aria-label="Eliminar material" title="Eliminar">${ico('trash')}</button>` : ''}</div>
+            <div class="item-meta">${m.Lectura ? `<span class="badge badge-brand">Lectura${m.Paginas ? ` · ${m.Paginas} pág.` : ''}</span>` : ''}${m.Descripcion ? `<span>${esc(m.Descripcion)}</span>` : ''}<span>${m.Tipo === 'ENLACE' ? esc(dominio(m.URL)) : `${esc(m.ArchivoNombre)} · ${tamano(m.Tamano || 0)}`}</span>${!compacto ? `<span>${esc(m.AutorNombre)} · ${fmtDate(m.Fecha)}</span>` : ''}</div>
+            ${m.Lectura && alumno ? avanceBarra(m, alumno) : ''}
+            ${m.Lectura && esStaff() ? `<div class="item-meta"><span>${avanceGrupoTexto(m)}</span></div>` : ''}</div>
+        <div class="item-side">${m.Lectura ? `<button class="btn ${state.me.Rol === ROLES.ESTUDIANTE ? 'btn-primary' : 'btn-ghost'} btn-sm" data-action="leer-pdf" data-id="${esc(m.MaterialID)}">${ico('book-open', 'icon-sm')} ${state.me.Rol === ROLES.ESTUDIANTE ? (idx.avance.get(`${m.MaterialID}|${alumno}`)?.Completa ? 'Ver de nuevo' : idx.avance.get(`${m.MaterialID}|${alumno}`) ? 'Continuar' : 'Leer') : 'Ver'}</button>
+            ${esStaff() ? `<button class="btn btn-ghost btn-sm" data-action="avance-lectura" data-id="${esc(m.MaterialID)}">${ico('users', 'icon-sm')} Avance</button>` : ''}` : ''}
+            ${materialLink(m)}${gestiona ? `<button class="icon-btn danger" data-action="delete-material" data-id="${esc(m.MaterialID)}" aria-label="Eliminar material" title="Eliminar">${ico('trash')}</button>` : ''}</div>
     </li>`).join('')}</ul>`;
 }
+
+/** Barra de avance (azul; verde al completar): no usa los colores de las notas. */
+const barraAvance = (pct) => `<div class="bar lec${pct >= 100 ? ' is-full' : ''}"><span style="width:${Math.max(0, Math.min(100, pct))}%"></span></div>`;
+
+/** Barra de avance de un alumno en una lectura. */
+function avanceBarra(m, estId) {
+    const a = idx.avance.get(`${m.MaterialID}|${estId}`);
+    const total = a?.Total || m.Paginas || 0;
+    const vistas = a?.Vistas?.length || 0;
+    const pct = total ? Math.round(vistas / total * 100) : 0;
+    return `<div class="lec-avance">${barraAvance(pct)}<small class="muted">${a?.Completa ? `${ico('check', 'icon-xs')} Vista completa · ${fmtDate(a.CompletaEn)}` : a ? `Páginas vistas: ${vistas} de ${total || '?'} (${pct}%)` : 'Sin empezar'}</small></div>`;
+}
+
+/** Para el maestro: cuántos alumnos del curso completaron la lectura. */
+function avanceGrupoTexto(m) {
+    const alumnos = alumnosDe(m.CursoID);
+    const completas = alumnos.filter(a => idx.avance.get(`${m.MaterialID}|${a.ID}`)?.Completa).length;
+    const empezadas = alumnos.filter(a => idx.avance.get(`${m.MaterialID}|${a.ID}`)).length;
+    return `${completas} de ${alumnos.length} la vieron completa · ${empezadas - completas} en progreso`;
+}
+
+async function verAvanceLectura(materialId) {
+    const m = state.db.materiales.find(x => x.MaterialID === materialId);
+    if (!m) return;
+    const alumnos = alumnosDe(m.CursoID);
+    await openModal({
+        title: `Avance · ${m.Titulo}`,
+        wide: true,
+        sinCancelar: true,
+        submitLabel: 'Listo',
+        body: `<p class="muted" style="font-size:13px">Una página cuenta cuando el alumno la tuvo en pantalla dentro de la app. Lo leído en una copia descargada no suma.</p>
+            <div class="table-wrap"><table class="table"><thead><tr><th>Alumno</th><th style="width:34%">Páginas vistas</th><th>Estado</th><th>Última actividad</th></tr></thead>
+            <tbody>${alumnos.map(a => {
+                const av = idx.avance.get(`${m.MaterialID}|${a.ID}`);
+                const total = av?.Total || m.Paginas || 0;
+                const pct = av && total ? Math.round(av.Vistas.length / total * 100) : 0;
+                return `<tr><td>${person(a, a.Grado)}</td>
+                    <td>${barraAvance(pct)}<small class="muted">${av ? `${av.Vistas.length} de ${total} · va en la página ${av.Ultima}` : '—'}</small></td>
+                    <td>${av?.Completa ? `<span class="badge badge-success">Vista completa</span>` : av ? '<span class="badge badge-warn">En progreso</span>' : '<span class="badge">Sin empezar</span>'}</td>
+                    <td><small>${av ? fmtDateTime(av.ActualizadaEn) : '—'}</small></td></tr>`;
+            }).join('')}</tbody></table></div>`,
+        onSubmit: async () => true,
+    });
+}
+
+// --------------------------------------------------------------------------
+// Lector de PDF dentro de la app (PDF.js, alojado junto a la app en vendor/pdfjs).
+// Cada página que aparece en pantalla cuenta como vista; el avance se guarda por tandas.
+// --------------------------------------------------------------------------
+
+let pdfjsCargado = null;
+function cargarPdfjs() {
+    pdfjsCargado ||= import('./vendor/pdfjs/pdf.min.js').then((lib) => {
+        lib.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdfjs/pdf.worker.min.js', import.meta.url).href;
+        return lib;
+    });
+    return pdfjsCargado;
+}
+
+const b64aBytes = (b64) => { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
+
+async function contarPaginasPdf(file) {
+    try {
+        const lib = await cargarPdfjs();
+        const pdf = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise;
+        const n = pdf.numPages;
+        pdf.destroy();
+        return n;
+    } catch (e) {
+        console.warn('[Plataforma] No se pudieron contar las páginas del PDF:', e);
+        return 0;
+    }
+}
+
+const visor = { pdf: null, m: null, pagina: 1, zoom: 1, registra: false, vistas: new Set(), pendientes: new Set(), timer: null, render: null };
+
+async function abrirLectura(materialId) {
+    const m = state.db.materiales.find(x => x.MaterialID === materialId);
+    if (!m) return;
+    const registra = state.me.Rol === ROLES.ESTUDIANTE;
+    const previo = registra ? idx.avance.get(`${m.MaterialID}|${state.me.ID}`) : null;
+    Object.assign(visor, { pdf: null, m, pagina: previo?.Ultima || 1, zoom: 1, registra, vistas: new Set(previo?.Vistas || []), pendientes: new Set() });
+    const cerrado = openModal({
+        title: m.Titulo,
+        wide: true,
+        sinCancelar: true,
+        submitLabel: 'Cerrar',
+        body: `<div class="pdf-visor" data-pdf>
+            <div class="pdf-toolbar">
+                <button type="button" class="icon-btn" data-action="pdf-pag" data-d="-1" aria-label="Página anterior">${ico('chevron-left')}</button>
+                <span class="pdf-pagina" data-pdf-pagina>Cargando…</span>
+                <button type="button" class="icon-btn" data-action="pdf-pag" data-d="1" aria-label="Página siguiente">${ico('chevron-right')}</button>
+                <span class="spacer"></span>
+                <button type="button" class="icon-btn" data-action="pdf-zoom" data-d="-1" aria-label="Alejar">−</button>
+                <button type="button" class="icon-btn" data-action="pdf-zoom" data-d="1" aria-label="Acercar">+</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-action="download-material" data-id="${esc(m.MaterialID)}">${ico('download', 'icon-sm')} Descargar</button>
+            </div>
+            ${registra ? `<div class="pdf-avance" data-pdf-avance></div>` : ''}
+            <div class="pdf-hoja" data-pdf-hoja><canvas data-pdf-canvas aria-label="Página del documento"></canvas></div>
+            ${registra ? '<p class="muted pdf-nota">Cada página que veas aquí suma a tu avance. Lo que leas en una copia descargada no cuenta.</p>' : ''}
+        </div>`,
+        onSubmit: async () => true,
+    });
+    try {
+        const [lib, f] = await Promise.all([cargarPdfjs(), api('getMaterialFile', { MaterialID: m.MaterialID })]);
+        visor.pdf = await lib.getDocument({ data: b64aBytes(f.base64), isEvalSupported: false }).promise;
+        visor.pagina = Math.min(Math.max(1, visor.pagina), visor.pdf.numPages);
+        await pintarPagina();
+    } catch (e) {
+        const hoja = $('[data-pdf-hoja]');
+        if (hoja) hoja.innerHTML = `<p class="muted center" style="padding:24px">No se pudo abrir el documento. ${esc(e.message || '')}</p>`;
+    }
+    await cerrado;
+    clearTimeout(visor.timer);
+    await guardarAvance();
+    visor.pdf?.destroy();
+    visor.pdf = null;
+}
+
+async function pintarPagina() {
+    const canvas = $('[data-pdf-canvas]');
+    if (!visor.pdf || !canvas) return;
+    visor.render?.cancel?.();
+    const page = await visor.pdf.getPage(visor.pagina);
+    const hoja = $('[data-pdf-hoja]');
+    const ancho = Math.max(280, (hoja?.clientWidth || 700) - 16);
+    const base = page.getViewport({ scale: 1 });
+    const escala = (ancho / base.width) * visor.zoom;
+    const dpr = window.devicePixelRatio || 1;
+    const vp = page.getViewport({ scale: escala * dpr });
+    canvas.width = Math.floor(vp.width);
+    canvas.height = Math.floor(vp.height);
+    canvas.style.width = `${Math.floor(vp.width / dpr)}px`;
+    canvas.style.height = `${Math.floor(vp.height / dpr)}px`;
+    visor.render = page.render({ canvasContext: canvas.getContext('2d'), viewport: vp });
+    try { await visor.render.promise; } catch (e) { if (e?.name !== 'RenderingCancelledException') throw e; return; }
+    const total = visor.pdf.numPages;
+    $('[data-pdf-pagina]').textContent = `Página ${visor.pagina} de ${total}`;
+    if (visor.registra) {
+        if (!visor.vistas.has(visor.pagina)) { visor.vistas.add(visor.pagina); visor.pendientes.add(visor.pagina); }
+        const n = visor.vistas.size;
+        const box = $('[data-pdf-avance]');
+        if (box) box.innerHTML = `${barraAvance(Math.round(n / total * 100))}<small class="muted">${n >= total ? `${ico('check', 'icon-xs')} ¡Vista completa!` : `Has visto ${n} de ${total} páginas`}</small>`;
+        clearTimeout(visor.timer);
+        visor.timer = setTimeout(guardarAvance, 4000);
+    }
+}
+
+/** Guarda por tandas: las páginas nuevas y en qué página quedó. */
+async function guardarAvance() {
+    if (!visor.registra || !visor.m) return;
+    const paginas = [...visor.pendientes];
+    const anterior = idx.avance.get(`${visor.m.MaterialID}|${state.me.ID}`);
+    if (!paginas.length && anterior?.Ultima === visor.pagina) return;
+    visor.pendientes.clear();
+    try {
+        const r = await api('registrarLectura', { MaterialID: visor.m.MaterialID, paginas, ultima: visor.pagina, total: visor.pdf?.numPages || 0 });
+        if (r && r.AvanceID) {
+            sumarDatos({ avances: [r] });
+            if (!$('#modal').open) render();
+        }
+    } catch (e) {
+        paginas.forEach(p => visor.pendientes.add(p));   // se reintenta en la próxima tanda
+        console.warn('[Plataforma] No se pudo guardar el avance de lectura:', e.message);
+    }
+}
+
+function moverPagina(d) {
+    if (!visor.pdf) return;
+    const nueva = Math.min(Math.max(1, visor.pagina + d), visor.pdf.numPages);
+    if (nueva === visor.pagina) return;
+    visor.pagina = nueva;
+    pintarPagina();
+    $('[data-pdf-hoja]')?.scrollTo({ top: 0 });
+}
+
+document.addEventListener('keydown', (ev) => {
+    if (!visor.pdf || !$('#modal').open || ev.target?.matches?.('input, textarea, select')) return;
+    if (ev.key === 'ArrowRight' || ev.key === 'PageDown') { ev.preventDefault(); moverPagina(1); }
+    if (ev.key === 'ArrowLeft' || ev.key === 'PageUp') { ev.preventDefault(); moverPagina(-1); }
+});
 
 function cursoMaterial(c, m) {
     const units = Grades.units(c.CursoID);
@@ -3234,6 +3428,8 @@ async function openMaterialModal(cursoId, itemId = '') {
             ${item ? '' : `<label class="field"><span>Unidad</span><select name="Unidad">${options([[0, 'General del curso'], ...units.map(u => [u.numero, `U${u.numero} · ${u.nombre}`])], 0)}</select></label>`}
             <label class="field span-all" data-mat-archivo><span>Archivo * <small class="muted">(máx. ${CONFIG.MAX_ENTREGA_MB} MB)</small></span>
                 <input type="file" name="archivo" accept="${CONFIG.EXTENSIONES.map(e => '.' + e).join(',')}"></label>
+            ${item ? '' : `<label class="check-item span-all" data-mat-archivo><input type="checkbox" name="Lectura">
+                <span><strong>Lectura con seguimiento (solo PDF)</strong><small>Los alumnos la leen dentro de la app y tú ves cuántas páginas vio cada uno.</small></span></label>`}
             <label class="field span-all" data-mat-enlace hidden><span>Enlace *</span><input type="url" name="URL" maxlength="2000" placeholder="https://…"></label>
             <label class="field span-all"><span>Descripción</span><textarea name="Descripcion" rows="2" maxlength="1000"></textarea></label>
         </div>`,
@@ -3250,6 +3446,11 @@ async function openMaterialModal(cursoId, itemId = '') {
                 if (!CONFIG.EXTENSIONES.includes(ext)) throw new Error(`Tipo de archivo no permitido. Usa: ${CONFIG.EXTENSIONES.join(', ')}.`);
                 if (file.size > CONFIG.MAX_ENTREGA_MB * 1024 * 1024) throw new Error(`El archivo supera ${CONFIG.MAX_ENTREGA_MB} MB.`);
                 payload.nombre = file.name;
+                if (fd.get('Lectura') === 'on') {
+                    if (ext !== 'pdf') throw new Error('Las lecturas con seguimiento deben ser un archivo PDF.');
+                    payload.Lectura = true;
+                    payload.Paginas = await contarPaginasPdf(file);
+                }
                 payload.base64 = await fileToBase64(file);
             }
             await withBusy(() => api('saveMaterial', payload));
@@ -3267,7 +3468,7 @@ async function openMaterialModal(cursoId, itemId = '') {
  * Abre un modal con formulario. onSubmit(FormData, form) puede lanzar un error:
  * se muestra dentro del modal y el usuario puede corregir sin perder lo escrito.
  */
-function openModal({ title, body, submitLabel = 'Guardar', danger = false, wide = false, onSubmit }) {
+function openModal({ title, body, submitLabel = 'Guardar', danger = false, wide = false, sinCancelar = false, onSubmit }) {
     const dlg = $('#modal');
     dlg.className = `modal${wide ? ' modal-wide' : ''}`;
     dlg.innerHTML = `<form class="modal-card" novalidate>
@@ -3275,7 +3476,7 @@ function openModal({ title, body, submitLabel = 'Guardar', danger = false, wide 
         <div class="modal-body">${body}</div>
         <p class="form-error" role="alert" hidden></p>
         <footer class="modal-foot">
-            <button type="button" class="btn btn-ghost" data-close>Cancelar</button>
+            ${sinCancelar ? '' : '<button type="button" class="btn btn-ghost" data-close>Cancelar</button>'}
             <button type="submit" class="btn ${danger ? 'btn-danger' : 'btn-primary'}">${esc(submitLabel)}</button>
         </footer></form>`;
 
@@ -3639,6 +3840,10 @@ const ACTIONS = {
         });
     },
     'new-material': (el) => openMaterialModal(el.dataset.curso, el.dataset.item || ''),
+    'leer-pdf': (el) => abrirLectura(el.dataset.id),
+    'avance-lectura': (el) => verAvanceLectura(el.dataset.id),
+    'pdf-pag': (el) => moverPagina(Number(el.dataset.d)),
+    'pdf-zoom': (el) => { visor.zoom = Math.min(3, Math.max(0.5, visor.zoom + Number(el.dataset.d) * 0.25)); pintarPagina(); },
     'download-material': (el) => downloadEntrega(el, 'getMaterialFile', { MaterialID: el.dataset.id }),
     'delete-material': async (el) => {
         const m = state.db.materiales.find(x => x.MaterialID === el.dataset.id);
